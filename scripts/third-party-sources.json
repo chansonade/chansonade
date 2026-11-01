@@ -1,0 +1,62 @@
+[
+  {
+    "name": "verovio",
+    "version": "6.4.0",
+    "repository": "rism-digital/verovio",
+    "ref": "cb5fcfa1178238138aa7f51f1e55f6a743eb26cc",
+    "url": "https://codeload.github.com/rism-digital/verovio/tar.gz/cb5fcfa1178238138aa7f51f1e55f6a743eb26cc",
+    "file": "verovio-6.4.0-upstream.tar.gz",
+    "sha256": "4d5b723af2805453d58cc9b6a9de8934973f95d8d711affa8e19018ada80e8cb",
+    "commit": "cb5fcfa1178238138aa7f51f1e55f6a743eb26cc"
+  },
+  {
+    "name": "spessasynth_lib",
+    "version": "4.4.2",
+    "repository": "spessasus/spessasynth_lib",
+    "ref": "4af2b7359bc3359ab5c62a7971572a49c384ab35",
+    "url": "https://codeload.github.com/spessasus/spessasynth_lib/tar.gz/4af2b7359bc3359ab5c62a7971572a49c384ab35",
+    "file": "spessasynth_lib-4.4.2-upstream.tar.gz",
+    "sha256": "31fc3bc6cf4ed4e5f4f8a67d90e90215e7cd7a2527d6fcd7adb0304001204830",
+    "commit": "4af2b7359bc3359ab5c62a7971572a49c384ab35"
+  },
+  {
+    "name": "spessasynth_core",
+    "version": "4.4.4",
+    "repository": "spessasus/spessasynth_core",
+    "ref": "7cf7af4bafcfbfea5145b837f01e5be786074cb1",
+    "url": "https://codeload.github.com/spessasus/spessasynth_core/tar.gz/7cf7af4bafcfbfea5145b837f01e5be786074cb1",
+    "file": "spessasynth_core-4.4.4-upstream.tar.gz",
+    "sha256": "3d518d07f3824a521982ec9a00a61c1638cfd209a3ab6deff427d411e1ad3f32",
+    "commit": "7cf7af4bafcfbfea5145b837f01e5be786074cb1"
+  },
+  {
+    "name": "stb-vorbis",
+    "version": "0.0.7",
+    "repository": "spessasus/stb-vorbis",
+    "ref": "ff55e98adfb227507227f6ae4f70abba9f164d06",
+    "url": "https://codeload.github.com/spessasus/stb-vorbis/tar.gz/ff55e98adfb227507227f6ae4f70abba9f164d06",
+    "file": "stb-vorbis-0.0.7-upstream.tar.gz",
+    "sha256": "4e96ff8ddccc180b5eead8980401484823bec646401834e4e2f70b8e38be3499",
+    "commit": "ff55e98adfb227507227f6ae4f70abba9f164d06"
+  },
+  {
+    "name": "fflate",
+    "version": "0.8.3",
+    "repository": "101arrowz/fflate",
+    "ref": "v0.8.3",
+    "url": "https://codeload.github.com/101arrowz/fflate/tar.gz/v0.8.3",
+    "file": "fflate-0.8.3-upstream.tar.gz",
+    "sha256": "cc8d7178795b2fea17733adbd6193cfbbc8d7e169eb91cc34b4b38ec3bcb354e",
+    "commit": "dcb3714a6c25db3a2748641019c5277413d09714"
+  },
+  {
+    "name": "@lucide/svelte",
+    "version": "1.66.0",
+    "repository": "lucide-icons/lucide",
+    "ref": "1.66.0",
+    "url": "https://codeload.github.com/lucide-icons/lucide/tar.gz/1.66.0",
+    "file": "lucide-svelte-1.66.0-upstream.tar.gz",
+    "sha256": "5b9428e376f32a5be2e58b0f55627d838fa97d978dec43698ec31ffcf79ab182",
+    "commit": "a630cec77eac6568b989e87e4947a8bfe45caacd"
+  }
+]

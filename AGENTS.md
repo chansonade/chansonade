@@ -1,0 +1,36 @@
+# Chansonade
+
+POC web de lecture de partitions, chant et piano. Priorité au fonctionnement et au confort réel : garder des modules simples, ajouter des abstractions ou tests seulement pour un besoin concret. Voir `docs/ARCHITECTURE.md` et `CONTRIBUTING.md`.
+
+## Développement
+
+- `npm ci`, puis `npm run dev` : http://localhost:5178.
+- `npm run build` : vérification Svelte/TypeScript, compilation, offre source et cache hors ligne. `npm run preview` permet d'essayer la production.
+- Les partitions, la gravure, la synthèse, le piano et l'analyse du micro restent dans le navigateur. Le serveur de synchronisation est un projet privé distinct, jamais inclus dans les sources publiques.
+- Tous les assets et le service worker respectent `CHANSONADE_BASE_PATH`. Ne jamais intercepter ou mettre en cache les réponses API.
+- Le thème utilise `html[data-theme="light"|"dark"]`. Préférer les variables sémantiques et conserver une gravure lisible dans les deux thèmes.
+
+## Vues et audio
+
+- Deux modes de partition : vertical et ruban horizontal continu. Le ruban glisse entre les repères de mesure avec lissage temporel indépendant des sauts entre les notes.
+- Sur mobile, Auto propose vertical en portrait et ruban immersif en paysage. Un choix manuel prend priorité ; rotation et changement de mise en page préservent transport et réglages.
+- Les commandes paysage flottent au-dessus du lecteur : leur disparition ne change ni le viewport ni l'échelle de gravure. Le vrai fullscreen passe par un bouton.
+- La transposition modifie l'audio et les notes attendues, pas la gravure du POC. Les mesures de hauteur réelles restent indépendantes des notes attendues.
+- Piano et clavier compact partagent `PianoKeyboard.svelte`. Le jeu manuel et le repère micro gardent leur hauteur réelle. Chaque appui a un relâchement, y compris au blur et au démontage.
+
+## Détection et essais
+
+- Le WAV conserve l'entrée brute ; seule l'analyse reçoit le filtre secteur. Le détecteur conserve ses candidats YIN, puis un seul décodeur temporel choisit la hauteur ou l'absence de hauteur fiable.
+- Ne pas ajouter de médiane, correction d'octave ou seuil conditionnel après ce décodeur. Ne pas recaler la courbe sur la partition : erreurs de justesse et silences réels doivent rester visibles.
+- Le segment pointillé est le traceback provisoire du même décodeur ; il ne figure jamais dans les points confirmés ou la prise sauvegardée. Ne pas avancer artificiellement ses horodatages.
+- Les prises restent locales dans IndexedDB (`chansonade`, schéma v4, store `takes`) et ne sont jamais synchronisées. Protéger ces données lors des vérifications et ne jamais les ajouter aux assets publics.
+- Ne pas modifier ou recharger l'application pendant une prise réelle : terminer et sauvegarder d'abord. Pour des changements parallèles à une séance utilisateur, utiliser un worktree et un autre port.
+- Préférer un navigateur de validation headless. Si une fenêtre utilisateur est réutilisée, conserver ses autres onglets et ne pas la placer devant. Fermer seulement les navigateurs de test créés pour la tâche.
+
+## Stockage et publication
+
+- Isoler bibliothèque, réglages, outbox et curseur par compte. Écrire ressource et outbox dans la même transaction. L'import anonyme vers un compte reste explicite.
+- Préserver les deux versions en conflit ; les retries ne créent pas de doublons. Ne pas modifier le mixage ou le transport actif à réception de réglages distants.
+- Le catalogue public contient Une souris verte. Le corpus privé optionnel de `local-scores/` est ignoré et utilisé seulement en développement. Ne jamais le publier, même dans l'historique Git.
+- Le client est GPL-3.0-only ; les ressources conservent leurs licences propres. Actualiser `THIRD_PARTY.md` et les sources épinglées avec toute évolution de dépendance.
+- L'historique de travail contient d'anciennes ressources privées : préparer un dépôt public avec `scripts/export-public.mjs`, conformément à `docs/PUBLISHING.md`. Ne pas réécrire ou publier cet historique sans instruction explicite.

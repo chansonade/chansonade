@@ -1,0 +1,9 @@
+node_modules
+dist/
+.DS_Store
+.browser/
+.browser-*.png
+*.log
+local-scores/
+.env
+.env.*
