@@ -138,6 +138,15 @@ input[type=range]:disabled { cursor: default; }
 
 /* One transport joins listening, repetition and vocal practice. */
 .transport { padding: 8px 24px 12px; flex-shrink: 0; position: relative; z-index: 10; background: var(--surface); border-top: 1px solid var(--line); }
+.replay-transport { min-height: 93px; }
+.replay-heading { display: flex; align-items: center; gap: 8px; min-height: 30px; font-size: 13px; }
+.replay-heading>strong { color: var(--coral); font-weight: 600; }
+.replay-heading>span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle); }
+.replay-heading>.icon-button { height: 30px; }
+.replay-controls { display: flex; align-items: center; gap: 12px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.replay-controls>input { flex: 1; min-width: 0; }
+.replay-controls>.play-button { width: 38px; height: 38px; }
+.replay-transport>audio { display: none; }
 .timeline-row { display: flex; align-items: center; gap: 10px; font-size: 11px; color: var(--subtle); font-variant-numeric: tabular-nums; height: 21px; }
 .timeline-row .elapsed { color: var(--ink); }
 .timeline-wrap { position: relative; flex: 1; display: flex; align-items: center; height: 20px; }

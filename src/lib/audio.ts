@@ -20,6 +20,8 @@ export class AudioPlayer {
   private loaded = false;
   private finished = false;
   private requestedRate = 1;
+  private pausedPosition: number | null = 0;
+  private pausedSeek = true;
   private loop: { start: number; end: number } | null = null;
   private pendingSeek: { seconds: number; requestedAt: number } | null = null;
   private preview: { channel: number; pitch: number; timer: ReturnType<typeof setTimeout> } | null = null;
@@ -36,6 +38,7 @@ export class AudioPlayer {
   get time() {
     if (!this.loaded || !this.sequencer) return 0;
     if (this.finished) return this.duration;
+    if (this.pausedPosition !== null) return this.pausedPosition;
     // The processor acknowledges seeks asynchronously. Expose the requested
     // position immediately, so the UI never jumps back for one animation frame.
     if (this.pendingSeek && performance.now() - this.pendingSeek.requestedAt < 500) {
@@ -90,9 +93,11 @@ export class AudioPlayer {
         sequencer.eventHandler.addEvent('songEnded', 'chansonade-end', () => {
           // Covers a B point at the very end, before the next UI frame arrives.
           if (this.loaded && this.loop) {
-            this.seek(this.loop.start);
-            sequencer.play();
-          } else if (this.loaded) this.finished = true;
+            this.startPlayback(this.loop.start);
+          } else if (this.loaded) {
+            this.finished = true;
+            this.pausedPosition = this.duration;
+          }
         });
       })().catch(async (error) => {
         this.synth?.destroy();
@@ -158,8 +163,9 @@ export class AudioPlayer {
       sequencer.loopCount = 0;
       sequencer.playbackRate = this.requestedRate;
       sequencer.pause();
-      sequencer.currentTime = 0;
-      this.pendingSeek = { seconds: 0, requestedAt: performance.now() };
+      this.pausedPosition = 0;
+      this.pausedSeek = true;
+      this.pendingSeek = null;
       this.loaded = true;
     });
     this.loadQueue = task;
@@ -172,27 +178,44 @@ export class AudioPlayer {
     await this.initialize();
     await (resume ?? this.audioContext!.resume());
     if (!this.loaded || !this.sequencer) throw new Error('Ouvre d’abord une partition.');
+    if (this.playing) return;
+    let position = this.time;
+    const restart = position >= this.duration - 0.02 || !!(this.loop && position >= this.loop.end);
+    if (restart) position = this.loop?.start ?? 0;
+    this.startPlayback(position, this.pausedSeek || restart);
+  }
+
+  private startPlayback(position: number, reseek = true) {
+    if (!this.sequencer) return;
     this.stopPreview();
-    if (this.time >= this.duration - 0.02 || (this.loop && this.time >= this.loop.end)) {
-      this.seek(this.loop?.start ?? 0);
-    }
     this.finished = false;
+    this.pausedPosition = null;
+    // Spessa snaps a paused seek to the next MIDI event. Unpause first, then
+    // seek in the same worklet message queue, so playback starts at our time.
     this.sequencer.play();
+    if (reseek) this.seek(position);
+    this.pausedSeek = false;
   }
 
   pause() {
+    const position = this.time;
     this.stopPreview();
     this.sequencer?.pause();
+    if (this.pausedPosition === null) {
+      this.pausedSeek = !!this.pendingSeek;
+      // A plain pause keeps Spessa's held-note state for a normal resume.
+      this.pausedPosition = this.pendingSeek ? position : clamp(this.sequencer?.currentTime ?? position, 0, this.duration);
+    }
+    this.pendingSeek = null;
     this.synth?.stopAll(true);
   }
 
   stop() {
     this.pause();
     this.finished = false;
-    if (this.sequencer) {
-      this.sequencer.currentTime = this.loop?.start ?? 0;
-      this.pendingSeek = { seconds: this.loop?.start ?? 0, requestedAt: performance.now() };
-    }
+    this.pausedPosition = this.loop?.start ?? 0;
+    this.pausedSeek = true;
+    this.pendingSeek = null;
   }
 
   seek(seconds: number) {
@@ -201,8 +224,19 @@ export class AudioPlayer {
     const position = clamp(seconds, 0, this.duration);
     this.stopPreview();
     this.synth?.stopAll(true);
+    if (this.pausedPosition !== null) {
+      // Hold this logical position until play(). Late processor sync messages
+      // must not change a paused cursor or the start of a recorded count-in.
+      this.pausedPosition = position;
+      this.pausedSeek = true;
+      this.pendingSeek = null;
+      return;
+    }
     this.pendingSeek = { seconds: position, requestedAt: performance.now() };
-    this.sequencer.currentTime = position;
+    // Score selection uses Verovio's nearest-millisecond timemap. Its MIDI
+    // onset may lie up to half a millisecond earlier; include that onset rather
+    // than skipping the first note when seeking to its rounded display time.
+    this.sequencer.currentTime = Math.max(0, position - 0.0005);
   }
 
   setRate(multiplier: number) {

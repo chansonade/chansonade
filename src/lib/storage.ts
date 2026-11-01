@@ -4,6 +4,7 @@ export type TakePitch = {
   time: number; frequency: number; rawFrequency: number; clarity: number; rms: number;
   midi: number; cents: number; scoreTime: number; expectedPitch: number | null;
   noteId: string | null; targetChannel: number; playing: boolean;
+  staff?: number; transpose?: number; epoch?: number;
 };
 export type TakeTransport = { time: number; scoreTime: number; playing: boolean; rate: number; targetChannel: number; transpose: number };
 export type RecordedTake = {
@@ -84,11 +85,16 @@ function db(): Promise<IDBDatabase> {
   if (database) return database;
   const opening: Promise<IDBDatabase> = new Promise<IDBDatabase>((resolve, reject) => {
     let failed = false;
-    const request = indexedDB.open('chansonade', 4);
+    const request = indexedDB.open('chansonade', 5);
     request.onupgradeneeded = () => {
       if (!request.result.objectStoreNames.contains('scores')) request.result.createObjectStore('scores', { keyPath: 'id' });
       if (!request.result.objectStoreNames.contains('takes')) {
         request.result.createObjectStore('takes', { keyPath: 'id' }).createIndex('createdAt', 'createdAt');
+      }
+      if (!request.result.objectStoreNames.contains('takeData')) request.result.createObjectStore('takeData', { keyPath: ['scope', 'id'] });
+      if (!request.result.objectStoreNames.contains('takeIndex')) {
+        const takes = request.result.createObjectStore('takeIndex', { keyPath: ['scope', 'id'] });
+        takes.createIndex('scope', 'scope');
       }
       if (!request.result.objectStoreNames.contains('meta')) request.result.createObjectStore('meta');
       if (!request.result.objectStoreNames.contains('resources')) {
@@ -108,7 +114,7 @@ function db(): Promise<IDBDatabase> {
     request.onerror = () => { failed = true; reject(request.error); };
     request.onblocked = () => { failed = true; reject(new Error('Rechargez les autres onglets Chansonade pour activer la sauvegarde des essais.')); };
   }).then(async (connection) => {
-    try { await migrateLocalDatabase(connection); await migrateScopedData(connection); return connection; }
+    try { await migrateLocalDatabase(connection); await migrateScopedData(connection); await migrateTakes(connection); return connection; }
     catch (cause) { connection.close(); throw cause; }
   });
   database = opening;
@@ -121,24 +127,142 @@ export async function scoreId(xml: string) {
   return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-export async function saveTake(take: RecordedTake) {
-  const database = await db();
-  await new Promise<void>((resolve, reject) => {
-    const tx = database.transaction('takes', 'readwrite');
-    tx.objectStore('takes').put(take);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error || new Error('Sauvegarde de l’essai interrompue.'));
+export type TakeSummary = {
+  id: string; createdAt: number; title: string; duration: number; scoreId: string;
+  synced: boolean; pending: boolean;
+};
+type TakeIndex = TakeSummary & { scope: string; deleted: boolean; change: number };
+type TakeData = { scope: string; id: string; take: RecordedTake };
+
+function takeSummary(take: RecordedTake, scope: string, pending: boolean): TakeIndex {
+  return { scope, id: take.id, createdAt: take.createdAt, title: take.title, duration: take.duration,
+    scoreId: take.scoreId, synced: scope !== ANONYMOUS_SCOPE && !pending, pending, deleted: false, change: 1 };
+}
+
+// The old, unscoped store remains untouched as a recovery copy. The marker and
+// new records commit together, so interrupted upgrades can be retried safely.
+async function migrateTakes(connection: IDBDatabase) {
+  await transaction(connection, ['takes', 'takeData', 'takeIndex', 'meta'], 'readwrite', async tx => {
+    const meta = tx.objectStore('meta');
+    if (await requestValue(meta.get('takes-scoped-v5'))) return;
+    const source = tx.objectStore('takes');
+    await new Promise<void>((resolve, reject) => {
+      const request = source.openCursor();
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) { resolve(); return; }
+        const take = cursor.value as RecordedTake;
+        tx.objectStore('takeData').put({ scope: ANONYMOUS_SCOPE, id: take.id, take } satisfies TakeData);
+        tx.objectStore('takeIndex').put(takeSummary(take, ANONYMOUS_SCOPE, false));
+        cursor.continue();
+      };
+    });
+    meta.put(true, 'takes-scoped-v5');
   });
 }
 
-export async function latestTake(): Promise<RecordedTake | null> {
-  const database = await db();
-  return new Promise((resolve, reject) => {
-    const request = database.transaction('takes').objectStore('takes').index('createdAt').openCursor(null, 'prev');
-    request.onsuccess = () => resolve(request.result?.value || null);
-    request.onerror = () => reject(request.error);
+export async function saveTake(take: RecordedTake, scope = activeScope) {
+  const connection = await db();
+  await transaction(connection, ['takeData', 'takeIndex'], 'readwrite', async tx => {
+    const index = tx.objectStore('takeIndex');
+    const old = await requestValue<TakeIndex | undefined>(index.get([scope, take.id]));
+    if (old) throw new Error('Cet essai existe déjà.');
+    tx.objectStore('takeData').put({ scope, id: take.id, take } satisfies TakeData);
+    index.put(takeSummary(take, scope, scope !== ANONYMOUS_SCOPE));
   });
+  changed(scope, 'write');
+}
+export async function listTakes(scope = activeScope): Promise<TakeSummary[]> {
+  const connection = await db();
+  const records = await requestValue<TakeIndex[]>(connection.transaction('takeIndex').objectStore('takeIndex').index('scope').getAll(scope));
+  return records.filter(record => !record.deleted).sort((a,b) => b.createdAt - a.createdAt).map(({ id, createdAt, title, duration, scoreId, synced, pending }) => ({ id, createdAt, title, duration, scoreId, synced: scope !== ANONYMOUS_SCOPE && synced, pending }));
+}
+export async function getTake(id: string, scope = activeScope): Promise<RecordedTake | null> {
+  const connection = await db();
+  return transaction(connection, ['takeData', 'takeIndex'], 'readonly', async tx => {
+    const index = await requestValue<TakeIndex | undefined>(tx.objectStore('takeIndex').get([scope, id]));
+    if (!index || index.deleted) return null;
+    const data = await requestValue<TakeData | undefined>(tx.objectStore('takeData').get([scope, id]));
+    return data?.take || null;
+  });
+}
+export async function latestTake(scope = activeScope): Promise<RecordedTake | null> {
+  const [latest] = await listTakes(scope);
+  return latest ? getTake(latest.id, scope) : null;
+}
+export async function deleteTake(id: string, scope = activeScope) {
+  const connection = await db();
+  await transaction(connection, ['takeData', 'takeIndex'], 'readwrite', async tx => {
+    const index = tx.objectStore('takeIndex');
+    const record = await requestValue<TakeIndex | undefined>(index.get([scope, id]));
+    if (!record || record.deleted) return;
+    record.deleted = true; record.pending = scope !== ANONYMOUS_SCOPE; record.synced = false; record.change++;
+    index.put(record); tx.objectStore('takeData').delete([scope, id]);
+  });
+  changed(scope, 'write');
+}
+
+/** Claim anonymous takes once, for the first account only; move atomically. */
+export async function claimAnonymousTakes(scope: string) {
+  if (scope === ANONYMOUS_SCOPE) return;
+  const connection = await db();
+  let moved = false;
+  await transaction(connection, ['takeData', 'takeIndex', 'meta'], 'readwrite', async tx => {
+    const meta = tx.objectStore('meta');
+    const owner = await requestValue<string | undefined>(meta.get('takes-anonymous-owner'));
+    if (owner && owner !== scope) return;
+    meta.put(scope, 'takes-anonymous-owner');
+    const index = tx.objectStore('takeIndex'), data = tx.objectStore('takeData');
+    const records = await requestValue<TakeIndex[]>(index.index('scope').getAll(ANONYMOUS_SCOPE));
+    for (const record of records) {
+      if (record.deleted) continue;
+      const source = await requestValue<TakeData | undefined>(data.get([ANONYMOUS_SCOPE, record.id]));
+      if (!source) continue;
+      let id = record.id;
+      if (await requestValue(index.get([scope, id]))) id = crypto.randomUUID();
+      const take = id === source.id ? source.take : { ...source.take, id };
+      data.put({ scope, id, take } satisfies TakeData);
+      index.put({ ...takeSummary(take, scope, true), change: record.change + 1 });
+      data.delete([ANONYMOUS_SCOPE, record.id]); index.delete([ANONYMOUS_SCOPE, record.id]); moved = true;
+    }
+  });
+  if (moved) changed(scope, 'write');
+}
+
+export async function takeSyncEntries(scope: string): Promise<TakeIndex[]> {
+  const connection = await db();
+  return requestValue(connection.transaction('takeIndex').objectStore('takeIndex').index('scope').getAll(scope));
+}
+export async function acknowledgeTake(scope: string, id: string, change: number) {
+  const connection = await db();
+  await transaction(connection, ['takeIndex'], 'readwrite', async tx => {
+    const store = tx.objectStore('takeIndex');
+    const record = await requestValue<TakeIndex | undefined>(store.get([scope, id]));
+    if (!record || record.change !== change) return;
+    record.pending = false; record.synced = true; store.put(record);
+  });
+  changed(scope, 'remote');
+}
+export async function applyRemoteTake(scope: string, id: string, take: RecordedTake | null) {
+  const connection = await db();
+  let didChange = false;
+  await transaction(connection, ['takeData', 'takeIndex'], 'readwrite', async tx => {
+    const index = tx.objectStore('takeIndex'), data = tx.objectStore('takeData');
+    const current = await requestValue<TakeIndex | undefined>(index.get([scope, id]));
+    // A local deletion wins over an in-flight download. A server tombstone
+    // wins over a local upload, so deleted takes never reappear.
+    if (take && current) return;
+    if (!take) {
+      if (current?.deleted && !current.pending) return;
+      const tombstone: TakeIndex = current || { scope, id, createdAt: 0, title: '', duration: 0, scoreId: '', synced: true, pending: false, deleted: true, change: 0 };
+      tombstone.deleted = true; tombstone.pending = false; tombstone.synced = true; tombstone.change++;
+      index.put(tombstone); data.delete([scope, id]); didChange = true;
+    } else {
+      data.put({ scope, id, take } satisfies TakeData); index.put(takeSummary(take, scope, false)); didChange = true;
+    }
+  });
+  if (didChange) changed(scope, 'remote');
 }
 
 export type ResourceKind = 'score' | 'settings';

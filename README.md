@@ -4,7 +4,7 @@
 
 A browser-based score reader and practice tool for singers and pianists. Chansonade combines MusicXML playback, an interactive piano and microphone pitch tracking. It is an early proof of concept; the interface is currently in French.
 
-Score rendering, audio synthesis and microphone analysis run on your device. The reader works without an account. An optional, separately hosted service synchronizes scores and practice settings.
+Score rendering, audio synthesis and microphone analysis run on your device. The reader works without an account. An optional, separately hosted service synchronizes scores, practice settings and recorded takes.
 
 ## Features
 
@@ -62,13 +62,13 @@ Select **“Enregistrer un essai”**. The microphone starts, a three-second cou
 
 Select **“Arrêter l’essai”** to stop, including from the floating landscape control. Reaching the end of the score also stops recording. Wait for saving to finish before reloading or closing the page.
 
-Takes remain on the device in IndexedDB (`chansonade`, store `takes`). They contain an uncompressed mono WAV, confirmed pitch observations, practice settings and transport timing. The count-in is included in the audio and identified separately in the metadata.
+Takes are saved on the device in IndexedDB. They contain an uncompressed mono WAV, confirmed pitch observations, the score, practice settings and transport timing. The count-in is included in the audio. Open **“Essais”** (recordings) to browse, replay, export or delete them, separately from the voice and instrument settings. Replay follows the recorded WAV clock and redraws the saved pitch curve, including pauses and loop jumps. When signed in, takes are also synchronized automatically to the account and can be retrieved on another device.
 
-- **“Réécouter”** opens the latest take for playback.
-- **“Exporter l’essai”** downloads a ZIP containing `voice.wav`, `analysis.json` and `score.musicxml`.
-- Recordings and their analysis are **never uploaded**, including when account synchronization is enabled.
+- **“Réécouter”** opens the selected take on its saved score.
+- The export button downloads a ZIP containing `voice.wav`, `analysis.json` and `score.musicxml`.
+- Deleting a take propagates the deletion to your other signed-in devices.
 
-Under **“Voix & instruments → Retour de voix”**, choose the microphone input. Browser-requested audio processing is disabled, but system-level noise cancellation can still affect the signal. The selected input's name and settings are included in take metadata. Exported takes therefore contain personal audio and metadata; share them deliberately.
+Under **“Voix & instruments → Retour de voix”**, choose the microphone input. Browser-requested audio processing is disabled, but system-level noise cancellation can still affect the signal. The input name and settings are kept in local take metadata and exports. Synchronization omits the device name and hardware identifiers, but sends the recording and its analysis to the account service.
 
 ### How pitch tracking works
 
@@ -82,9 +82,9 @@ This is a bounded-latency adaptation for live use, not an identical implementati
 
 Imported scores, per-score settings and pending synchronization changes are stored in IndexedDB, separately for each account and the anonymous library. Device-specific preferences stay in localStorage. Clearing site data removes that browser's local library and recordings.
 
-Signing in adds synchronization of scores and practice settings. Moving the anonymous library into an account requires an explicit action. Microphone selection, microphone timing adjustment, display preferences and recorded takes stay on the device.
+Signing in automatically synchronizes takes, scores and practice settings. Existing anonymous takes move to the first account used on that device; they are not copied to other accounts. Moving the anonymous score library into an account requires an explicit action. Microphone selection, microphone timing adjustment and display preferences stay on the device. Transfers pause during recording and resume afterward.
 
-The synchronization service is a **separate private project**. The client uses a same-origin JSON API under `api/v1/`, relative to its deployment path. Server revisions detect conflicts; mutation IDs support retries; deletion markers prevent an older device from silently restoring deleted data. Both versions of a conflict are retained until the user chooses one.
+The synchronization service is a **separate private project**. The client uses a same-origin API under `api/v1/`, relative to its deployment path; take metadata is JSON and WAV audio is transferred as binary. Takes are limited to 64 MiB each and 512 MiB total per account (including metadata), with at most 1,000 active takes. An interrupted transfer is retried; it remains stored locally if the limit or network prevents synchronization. Server revisions detect conflicts; mutation IDs support retries; deletion markers prevent an older device from silently restoring deleted data. Both versions of a conflict are retained until the user chooses one.
 
 Existing data from the app's previous name is migrated on the same origin without deleting the original copies or overwriting newer Chansonade records. Browser data belongs to an origin: moving to a different domain requires account synchronization or export/import.
 

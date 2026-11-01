@@ -1,0 +1,63 @@
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import { X, Play, Download, Trash2, Cloud, HardDrive, LoaderCircle, AudioLines } from '@lucide/svelte';
+  import { listTakes, getTake, deleteTake, storageScope, subscribeStorage, type RecordedTake, type TakeSummary } from './storage';
+  import { syncState } from './sync';
+  let { onclose, onplay, onexport, onerror, ondiscard, memoryTakes = [], blocked = false }: { onclose: () => void; onplay: (take: RecordedTake) => Promise<void>; onexport: (take: RecordedTake) => void; onerror: (message: string) => void; ondiscard: (id: string) => void; memoryTakes?: RecordedTake[]; blocked?: boolean } = $props();
+  let takes = $state<TakeSummary[]>([]);
+  let busy = $state('');
+  let failure = $state('');
+  let revision = 0;
+  let armedDelete = $state('');
+  const visibleTakes = $derived([...memoryTakes.filter(take => !takes.some(stored => stored.id === take.id)).map(take => ({ id: take.id, createdAt: take.createdAt, title: take.title, duration: take.duration, scoreId: take.scoreId, synced: false, pending: false })), ...takes].sort((a,b) => b.createdAt - a.createdAt));
+  const duration = (value: number) => `${Math.floor(value / 60)}:${String(Math.floor(value % 60)).padStart(2, '0')}`;
+  async function refresh() {
+    const request = ++revision, scope = storageScope();
+    try { const next = await listTakes(scope); if (request === revision && scope === storageScope()) takes = next; }
+    catch { failure = 'Impossible de lire les enregistrements de cet appareil.'; }
+  }
+  async function action(id: string, kind: 'play' | 'export' | 'delete') {
+    if (busy || blocked) return;
+    if (kind === 'delete' && armedDelete !== id) { armedDelete = id; return; }
+    busy = id; failure = '';
+    const scope = storageScope();
+    try {
+      if (kind === 'delete') { await deleteTake(id, scope); ondiscard(id); armedDelete = ''; }
+      else {
+        const take = memoryTakes.find(take => take.id === id) || await getTake(id, scope);
+        if (scope !== storageScope()) return;
+        if (!take) throw new Error('Cet essai n’est plus disponible.');
+        if (kind === 'play') { await onplay(take); onclose(); } else onexport(take);
+      }
+    } catch (cause) { failure = cause instanceof Error ? cause.message : 'Impossible d’ouvrir cet essai.'; onerror(failure); }
+    finally { busy = ''; }
+  }
+  onMount(() => { void refresh(); const stop = subscribeStorage(event => { if (event.reason === 'scope') { takes = []; armedDelete = ''; failure = ''; } void refresh(); }); return () => { revision++; stop(); }; });
+</script>
+
+<button class="drawer-backdrop" aria-label="Fermer les enregistrements" onclick={onclose}></button>
+<aside class="take-panel" aria-label="Enregistrements">
+  <div class="panel-heading"><AudioLines size={20} /><h2>Enregistrements</h2><button class="icon-button" aria-label="Fermer les enregistrements" onclick={onclose}><X size={20} /></button></div>
+  <p class="explanation">Réécoutez un essai avec sa partition et sa courbe de hauteur.</p>
+  <p class="sync-note">{#if $syncState.user}<Cloud size={15} /> Synchronisation automatique avec votre compte.{:else}<HardDrive size={15} /> Conservés sur cet appareil. Connectez-vous pour les synchroniser.{/if}</p>
+  {#if $syncState.user && $syncState.message}<p class="failure" role="status">{$syncState.message}</p>{/if}
+  {#if failure}<p class="failure" role="alert">{failure}</p>{/if}
+  {#if !visibleTakes.length}<p class="empty">Aucun essai enregistré. Utilisez « Enregistrer » pour commencer.</p>{/if}
+  <div class="take-list">{#each visibleTakes as take (take.id)}
+    <article class="take-card">
+      <h3>{take.title}</h3>
+      <p><time datetime={new Date(take.createdAt).toISOString()}>{new Date(take.createdAt).toLocaleString('fr-FR', {dateStyle:'medium',timeStyle:'short'})}</time><span>{duration(take.duration)}</span></p>
+      {#if memoryTakes.some(item => item.id === take.id)}<p class="failure">En mémoire seulement : exportez cet essai avant de fermer la page.</p>{/if}
+      <div class="take-controls"><button class="review-play" disabled={!!busy || blocked} onclick={() => void action(take.id, 'play')}>{#if busy === take.id}<LoaderCircle class="spin" size={16} />{:else}<Play size={16} />{/if}Réécouter</button><span class="take-sync" title={take.synced ? 'Synchronisé avec votre compte' : take.pending ? 'En attente de synchronisation' : 'Sur cet appareil'}>{#if take.synced}<Cloud size={15} />{:else}<HardDrive size={15} />{/if}</span><button class="icon-button" disabled={!!busy || blocked} aria-label="Exporter cet essai" onclick={() => void action(take.id, 'export')}><Download size={17} /></button><button class="delete-button" class:armed={armedDelete === take.id} disabled={!!busy || blocked} aria-label={armedDelete === take.id ? 'Confirmer la suppression' : 'Supprimer cet essai'} onclick={() => void action(take.id, 'delete')}><Trash2 size={17} />{#if armedDelete === take.id}<span>Confirmer</span>{/if}</button></div>
+    </article>
+  {/each}</div>
+</aside>
+
+<style>
+  .take-panel { position:fixed; inset:0 0 0 auto; z-index:50; width:min(410px,100vw); overflow:auto; background:var(--side); border-left:1px solid var(--line); padding:18px 22px; box-shadow:0 12px 50px #14213b30; }
+  .panel-heading { display:flex; align-items:center; gap:10px; } h2 { font-size:18px; font-weight:650; flex:1; }
+  .explanation,.sync-note,.empty { font-size:13px; line-height:1.6; color:var(--subtle); margin:15px 0; } .sync-note { display:flex; gap:8px; align-items:flex-start; } .sync-note :global(svg) { flex-shrink:0; margin-top:3px; }
+  .take-list { display:flex; flex-direction:column; gap:13px; margin-top:22px; } .take-card { border:1px solid var(--line); border-radius:9px; background:var(--paper); padding:15px; } h3 { font-size:14px; font-weight:600; margin:0 0 9px; overflow-wrap:anywhere; }
+  .take-card p { display:flex; justify-content:space-between; gap:8px; color:var(--subtle); font-size:12px; } .take-controls { display:flex; align-items:center; gap:4px; margin-top:13px; } .review-play { min-height:38px; display:flex; align-items:center; gap:7px; padding:7px 10px; border-radius:6px; color:var(--accent); background:var(--accent-soft); font-size:13px; }
+  .take-sync { margin-left:auto; color:var(--subtle); display:flex; align-items:center; } .delete-button { display:flex; align-items:center; justify-content:center; min-height:38px; min-width:32px; gap:5px; border-radius:6px; font-size:12px; } .armed,.failure { color:var(--coral); } .failure { font-size:13px; line-height:1.5; }
+</style>

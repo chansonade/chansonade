@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store';
-import { ANONYMOUS_SCOPE, storageScope, setStorageScope, subscribeStorage, pendingMutations, markMutationSent, releaseRejectedMutation, acceptMutation, applyRemoteChanges, syncCursor, syncConflicts, resolveSyncConflict, importAnonymousLibrary, type LocalResource, type RemoteResource, type ResourceKind } from './storage';
+import { synchronizeTakes, TakeAPIError } from './take-sync';
+import { takeSyncEntries, ANONYMOUS_SCOPE, storageScope, setStorageScope, subscribeStorage, pendingMutations, markMutationSent, releaseRejectedMutation, acceptMutation, applyRemoteChanges, syncCursor, syncConflicts, resolveSyncConflict, importAnonymousLibrary, type LocalResource, type RemoteResource, type ResourceKind } from './storage';
 
 type User = { id: string; email: string };
 type Session = { user: User | null; registration: 'invite' | 'open' };
@@ -29,6 +30,7 @@ let again = false;
 let stopListening: (() => void) | null = null;
 let stopped = false;
 let authChanging = false;
+let recordingPaused = false;
 
 async function request<T>(route: string, options: RequestInit = {}, account?: User, signal?: AbortSignal): Promise<T> {
   const timeout = new AbortController();
@@ -62,12 +64,13 @@ function adoptSession(session: Session) {
   update({ user, registration: session.registration, available: true, message: '', ...(changed ? { conflicts: [], pending: 0 } : {}), status: user ? 'En attente' : 'Local' });
 }
 async function refreshCounts(scope: string, currentEpoch = epoch) {
-  const [pending, conflicts] = await Promise.all([pendingMutations(scope), syncConflicts(scope)]);
+  const [pending, conflicts, takes] = await Promise.all([pendingMutations(scope), syncConflicts(scope), takeSyncEntries(scope)]);
   if (currentEpoch !== epoch || scope !== storageScope()) return;
-  update({ pending: pending.length, conflicts, status: conflicts.length ? 'Conflit' : pending.length ? 'En attente' : state.available ? 'Synchronisé' : 'Hors ligne' });
+  const pendingCount = pending.length + takes.filter(take => take.pending).length;
+  update({ pending: pendingCount, conflicts, status: conflicts.length ? 'Conflit' : pendingCount ? 'En attente' : state.available ? 'Synchronisé' : 'Hors ligne' });
 }
 function schedule(delay = 500) {
-  if (stopped || authChanging) return;
+  if (stopped || authChanging || recordingPaused) return;
   clearTimeout(timer);
   timer = setTimeout(() => { void synchronize(); }, delay);
 }
@@ -78,13 +81,13 @@ async function cycle() {
     // data request also binds this account explicitly, including across tabs.
     const sessionEpoch = epoch;
     const session = await request<Session>('session');
-    if (stopped || authChanging || sessionEpoch !== epoch) return;
+    if (stopped || authChanging || recordingPaused || sessionEpoch !== epoch) return;
     adoptSession(session);
     if (!user) return;
     const account = user, scope = storageScope(), currentEpoch = epoch;
     controller = new AbortController();
     const signal = controller.signal;
-    const current = () => !stopped && currentEpoch === epoch && !authChanging;
+    const current = () => !stopped && currentEpoch === epoch && !authChanging && !recordingPaused;
     // One score at a time keeps large MusicXML uploads within the API limit.
     // Settings are small too; a serial queue is enough for this POC.
     for (const mutation of await pendingMutations(scope)) {
@@ -108,28 +111,46 @@ async function cycle() {
     const response = await request<{ cursor: number; changes: RemoteResource[] }>(`changes?cursor=${cursor}`, {}, account, signal);
     if (!current()) return;
     await applyRemoteChanges(scope, response.changes, response.cursor);
+    if (!current()) return;
+    await synchronizeTakes(scope, account.id, signal, current);
+    if (!current()) return;
     await refreshCounts(scope, currentEpoch);
     if (state.pending) again = true;
+    else if (document.visibilityState === 'visible') schedule(30_000);
   } catch (cause) {
-    if (stopped || authChanging) return;
-    if (cause instanceof APIError && (cause.status === 401 || cause.status === 403)) {
+    if (stopped || authChanging || recordingPaused) return;
+    const failedEpoch = epoch, failedScope = storageScope();
+    if (user) await refreshCounts(failedScope, failedEpoch).catch(() => {});
+    if (stopped || authChanging || recordingPaused || failedEpoch !== epoch) return;
+    // A rejected take stays pending, but retries must not spin at 300 ms.
+    again = false;
+    if (user) await refreshCounts(storageScope()).catch(() => {});
+    if ((cause instanceof APIError || cause instanceof TakeAPIError) && (cause.status === 401 || cause.status === 403)) {
       update({ status: 'Connexion requise', message: 'La session a changé. Reconnectez le compte pour synchroniser.' });
-    } else if (cause instanceof APIError && cause.status !== 404 && cause.status !== 502) {
+    } else if ((cause instanceof APIError || cause instanceof TakeAPIError) && cause.status !== 404 && cause.status !== 502) {
       update({ available: true, status: user ? 'En attente' : 'Local', message: cause.message });
     } else {
       // A static self-hosted client without this API remains fully usable.
       update({ available: false, status: user ? 'Hors ligne' : 'Local', message: user ? 'Les modifications sont conservées sur cet appareil.' : '' });
     }
+    if (user && !stopped && !authChanging) schedule(30_000);
   } finally { controller = null; update({ busy: false }); }
 }
 export function synchronize(): Promise<void> {
-  if (stopped || authChanging) return Promise.resolve();
+  if (stopped || authChanging || recordingPaused) return Promise.resolve();
   if (running) { again = true; return running; }
   running = cycle().finally(() => {
     running = null;
-    if (again && !stopped && !authChanging) { again = false; schedule(300); }
+    if (again && !stopped && !authChanging && !recordingPaused) { again = false; schedule(300); }
   });
   return running;
+}
+/** Keep transfers and retries out of active recordings; resume automatically afterwards. */
+export function setTakeSyncPaused(paused: boolean) {
+  if (recordingPaused === paused) return;
+  recordingPaused = paused;
+  if (paused) { clearTimeout(timer); controller?.abort(); }
+  else { again = false; schedule(0); }
 }
 export function startSync() {
   stopped = false;

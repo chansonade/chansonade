@@ -1,4 +1,5 @@
 import { unzipSync, strFromU8 } from 'fflate';
+import { alignNoteTimings } from './loop';
 
 export type ViewMode = 'vertical' | 'horizontal';
 export type Part = {
@@ -17,7 +18,7 @@ export type Frame = { time: number; quarter: number; notes: string[]; measure?: 
 export type StaffNotation = { bottomStep: number | null; keyFifths: number; soundingOffset: number };
 export type StaffDescription = { staff: number; channel: number; changes: { elementId: string | null; notation: StaffNotation }[] };
 export type TimeAnchor = { time: number; elementId: string; staff: number };
-export type MusicalData = { midi: string; frames: Frame[]; notes: Record<string, MusicalNote>; parts: Part[]; tempo: number; duration: number; staffDescriptions: Record<string, StaffDescription>; timeAnchors: TimeAnchor[] };
+export type MusicalData = { midi: string; frames: Frame[]; notes: Record<string, MusicalNote>; parts: Part[]; tempo: number; duration: number; staffDescriptions: Record<string, StaffDescription>; timeAnchors: TimeAnchor[]; legacyLoopTimes?: { from: number; to: number }[] };
 export type ScoreResult = { pages: string[]; musical?: MusicalData };
 export type NotePosition = { id: string; time: number; duration: number; pitch: number; staff: number; channel: number; x: number; y: number; width: number; height: number; staffStepPx: number; systemY: number; systemHeight: number; measure: string };
 export type MeasurePosition = { id: string; time: number; x: number; y: number; width: number; height: number; number: number; systemId: string };
@@ -119,6 +120,7 @@ export class Score {
   }
 
   private convertMusic(data: any): MusicalData {
+    const legacyLoopTimes = alignNoteTimings(data.notes, data.timemap);
     const doc = new DOMParser().parseFromString(data.mei, 'application/xml');
     const staffChannels = new Map<number, number>();
     const partsByChannel = new Map<number, Part>();
@@ -197,7 +199,7 @@ export class Score {
       if (event.measureOn) measure = event.measureOn.replace(/-rend\d+$/, '');
       return { time: event.tstamp / 1000, quarter: event.qstamp, notes: [...active], measure, measureStart: !!event.measureOn };
     });
-    return { midi: data.midi, frames, notes: data.notes, parts: [...partsByChannel.values()], tempo: data.timemap.find((event: any) => event.tempo)?.tempo || 120, duration: frames.at(-1)?.time || 0, staffDescriptions, timeAnchors };
+    return { midi: data.midi, frames, notes: data.notes, parts: [...partsByChannel.values()], tempo: data.timemap.find((event: any) => event.tempo)?.tempo || 120, duration: frames.at(-1)?.time || 0, staffDescriptions, timeAnchors, legacyLoopTimes };
   }
 }
 

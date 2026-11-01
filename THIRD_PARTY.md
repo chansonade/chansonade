@@ -65,6 +65,9 @@ Les sous-ensembles latins de **DM Sans** et **Libre Caslon Display**, téléchar
 
 `public/logo.png` a été fourni par le porteur du projet et est conservé sans
 modification du bitmap. Il n'est pas couvert par la GPL du code de Chansonade.
+`public/logo-night.png` est une adaptation du symbole pour le mode nuit, sans
+lettrage et sur fond transparent, préparée avec un outil de génération d’images.
+Elle conserve le même statut de marque distincte du code.
 Sa licence de réutilisation distincte n'a pas été définie ; sa présence dans
 le site ou l'archive source n'accorde pas une autorisation générale de le
 réutiliser. Cette indication de provenance ne constitue pas une garantie sur

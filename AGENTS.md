@@ -23,13 +23,14 @@ POC web de lecture de partitions, chant et piano. Priorité au fonctionnement et
 - Le WAV conserve l'entrée brute ; seule l'analyse reçoit le filtre secteur. Le détecteur conserve ses candidats YIN, puis un seul décodeur temporel choisit la hauteur ou l'absence de hauteur fiable.
 - Ne pas ajouter de médiane, correction d'octave ou seuil conditionnel après ce décodeur. Ne pas recaler la courbe sur la partition : erreurs de justesse et silences réels doivent rester visibles.
 - Le segment pointillé est le traceback provisoire du même décodeur ; il ne figure jamais dans les points confirmés ou la prise sauvegardée. Ne pas avancer artificiellement ses horodatages.
-- Les prises restent locales dans IndexedDB (`chansonade`, schéma v4, store `takes`) et ne sont jamais synchronisées. Protéger ces données lors des vérifications et ne jamais les ajouter aux assets publics.
+- Les prises sont isolées par scope dans IndexedDB (`chansonade`, schéma v5, `takeData` et `takeIndex`) et synchronisées automatiquement lorsque le compte est connecté. Protéger les prises réelles lors des vérifications et ne jamais les ajouter aux assets publics.
 - Ne pas modifier ou recharger l'application pendant une prise réelle : terminer et sauvegarder d'abord. Pour des changements parallèles à une séance utilisateur, utiliser un worktree et un autre port.
 - Préférer un navigateur de validation headless. Si une fenêtre utilisateur est réutilisée, conserver ses autres onglets et ne pas la placer devant. Fermer seulement les navigateurs de test créés pour la tâche.
 
 ## Stockage et publication
 
 - Isoler bibliothèque, réglages, outbox et curseur par compte. Écrire ressource et outbox dans la même transaction. L'import anonyme vers un compte reste explicite.
+- Les anciennes prises anonymes sont attribuées une seule fois au premier compte. Les suppressions de prises sont des tombstones ; suspendre les transferts pendant une prise et reprendre ensuite. WAV limité à 64 Mio, quota compte 512 Mio et 1 000 entrées.
 - Préserver les deux versions en conflit ; les retries ne créent pas de doublons. Ne pas modifier le mixage ou le transport actif à réception de réglages distants.
 - Le catalogue public contient Une souris verte. Le corpus privé optionnel de `local-scores/` est ignoré et utilisé seulement en développement. Ne jamais le publier, même dans l'historique Git.
 - Le client est GPL-3.0-only ; les ressources conservent leurs licences propres. Actualiser `THIRD_PARTY.md` et les sources épinglées avec toute évolution de dépendance.
