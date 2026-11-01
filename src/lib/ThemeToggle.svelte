@@ -23,18 +23,18 @@
     min-height: 36px;
     padding: 8px 11px;
     border: 1px solid var(--line);
-    border-radius: 10px;
+    border-radius: 7px;
     background: var(--paper);
     color: var(--ink);
-    font-size: 11px;
+    font-size: 12px;
     line-height: 1.2;
     white-space: nowrap;
   }
   .theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
-  .compact { width: 34px; min-width: 34px; min-height: 34px; padding: 7px; }
+  .compact { width: 36px; min-width: 36px; min-height: 36px; padding: 7px; }
   .compact span { display: none; }
   @media(max-width:650px) {
-    .theme-toggle { width: 34px; min-width: 34px; min-height: 34px; padding: 7px; }
+    .theme-toggle { width: 36px; min-width: 36px; min-height: 36px; padding: 7px; }
     .theme-toggle span { display: none; }
   }
 </style>

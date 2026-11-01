@@ -104,7 +104,7 @@
     max-height: 92dvh;
     overflow: auto;
     box-shadow: 0 20px 100px #16321d30;
-    font-size: 12px;
+    font-size: 13px;
   }
   .close {
     position: absolute;
@@ -119,7 +119,7 @@
     margin: 0 0 20px;
   }
   .account-dialog h3 {
-    font-size: 12px;
+    font-size: 13px;
     margin: 0 0 9px;
     font-weight: 600;
   }
@@ -138,7 +138,7 @@
     flex-wrap: wrap;
   }
   .sync-status>span {
-    font-size: 11px;
+    font-size: 13px;
   }
   .secondary {
     display: inline-flex;
@@ -148,7 +148,7 @@
     border: 1px solid #d2d8c8;
     border-radius: 6px;
     padding: 9px 11px;
-    font-size: 11px;
+    font-size: 13px;
     line-height: 1.5;
   }
   .local-import {
@@ -158,7 +158,7 @@
     border-bottom: 1px solid var(--line);
   }
   .local-import p {
-    font-size: 11px;
+    font-size: 13px;
   }
   .local-import .secondary {
     width: 100%;
@@ -174,7 +174,7 @@
     margin-bottom: 17px;
   }
   .tabs button {
-    font-size: 12px;
+    font-size: 13px;
     padding: 10px 13px;
     border-bottom: 2px solid transparent;
   }
@@ -188,7 +188,7 @@
     margin-top: 20px;
   }
   form label {
-    font-size: 11px;
+    font-size: 13px;
     margin-top: 7px;
   }
   form input {
@@ -199,7 +199,7 @@
     border-radius: 5px;
   }
   form small {
-    font-size: 10px;
+    font-size: 13px;
     line-height: 1.5;
   }
   form .primary-button {
@@ -222,14 +222,14 @@
     margin-bottom: 22px;
   }
   .conflicts>p {
-    font-size: 11px;
+    font-size: 13px;
   }
   .conflict {
     padding: 13px 0;
     border-bottom: 1px solid var(--line);
   }
   .conflict strong {
-    font-size: 11px;
+    font-size: 13px;
     display: block;
     overflow-wrap: anywhere;
     line-height: 1.5;
@@ -241,7 +241,7 @@
     gap: 7px;
   }
   .conflict .secondary {
-    font-size: 10px;
+    font-size: 13px;
   }
   @media(max-width:550px) {
     .account-backdrop {
@@ -251,7 +251,7 @@
       padding: 25px 20px;
     }
     .local-import .secondary {
-      font-size: 10px;
+      font-size: 13px;
     }
     .sync-status {
       align-items: flex-start;

@@ -23,20 +23,20 @@
     min-height: 36px;
     padding: 8px 11px;
     border: 1px solid var(--line);
-    border-radius: 10px;
+    border-radius: 7px;
     background: var(--paper);
     color: var(--ink);
-    font-size: 11px;
+    font-size: 12px;
   }
   .repository-link:hover { border-color: var(--accent); }
   img { flex-shrink: 0; }
   .night { display: none; }
   :global([data-theme="dark"]) .day { display: none; }
   :global([data-theme="dark"]) .night { display: block; }
-  .compact { width: 34px; min-height: 34px; padding: 7px; }
+  .compact { width: 36px; min-height: 36px; padding: 7px; }
   .compact span { display: none; }
   @media(max-width:650px) {
-    .repository-link { width: 34px; min-height: 34px; padding: 7px; }
+    .repository-link { width: 36px; min-height: 36px; padding: 7px; }
     span { display: none; }
   }
 </style>

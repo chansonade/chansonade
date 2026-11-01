@@ -14,7 +14,7 @@ POC web de lecture de partitions, chant et piano. Priorité au fonctionnement et
 
 - Deux modes de partition : vertical et ruban horizontal continu. Le ruban glisse entre les repères de mesure avec lissage temporel indépendant des sauts entre les notes.
 - Sur mobile, Auto propose vertical en portrait et ruban immersif en paysage. Un choix manuel prend priorité ; rotation et changement de mise en page préservent transport et réglages.
-- Les commandes paysage flottent au-dessus du lecteur : leur disparition ne change ni le viewport ni l'échelle de gravure. Le vrai fullscreen passe par un bouton.
+- Les commandes paysage occupent des rangées réservées : leur disparition ne change ni le viewport ni l'échelle de gravure et ne masque aucune portée. Le vrai fullscreen passe par un bouton.
 - La transposition modifie l'audio et les notes attendues, pas la gravure du POC. Les mesures de hauteur réelles restent indépendantes des notes attendues.
 - Piano et clavier compact partagent `PianoKeyboard.svelte`. Le jeu manuel et le repère micro gardent leur hauteur réelle. Chaque appui a un relâchement, y compris au blur et au démontage.
 
