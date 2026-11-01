@@ -1,119 +1,139 @@
 # Chansonade
 
-[Code source sur GitHub](https://github.com/chansonade/chansonade) · [Signaler un problème](https://github.com/chansonade/chansonade/issues)
+[Try the app](https://nafis.io/projects/chansonade/) · [Source code](https://github.com/chansonade/chansonade) · [Report an issue](https://github.com/chansonade/chansonade/issues)
 
-Application de lecture de partitions, de chant et de piano, inspirée de Scorpus. POC web en français : les partitions, la synthèse audio et l’analyse du micro sont traitées dans le navigateur.
+A browser-based score reader and practice tool for singers and pianists. Chansonade combines MusicXML playback, an interactive piano and microphone pitch tracking. It is an early proof of concept; the interface is currently in French.
 
-## Lancer
+Score rendering, audio synthesis and microphone analysis run on your device. The reader works without an account. An optional, separately hosted service synchronizes scores and practice settings.
 
-Node.js 22.13 ou plus récent et npm sont nécessaires.
+## Features
+
+- **Score view — “Partition”**: vertical notation with automatic tracking of the current system.
+- **Ribbon view — “Ruban”**: a continuous horizontal score with smooth movement between bar markers, independent of note highlighting.
+- **Mobile Auto mode**: vertical notation in portrait and an immersive ribbon in landscape. A manual choice overrides orientation.
+- **Interactive piano**: 88 keys, mouse, multitouch and computer-keyboard input. It shows the target voice, accompaniment, played keys and detected microphone pitch, including positions between keys.
+- Playback, tempo adjustment, note navigation, zoom and click-to-seek.
+- Repeated passages, per-part volume, mute/solo, instrument selection and audio transposition.
+- Live pitch traces, pitch deviation in cents and local practice recordings.
+- Day, night and system themes, local imports, saved settings and export of the original MusicXML.
+
+## Run locally
+
+Use Node.js **22.13 or newer** and npm. Building the downloadable source bundle also requires **GNU tar**.
 
 ```sh
 npm ci
 npm run dev
 ```
 
-Ouvrir `http://localhost:5178`. La bibliothèque publique propose **Une souris verte**, un arrangement de travail pour chant et piano. Un éventuel corpus privé dans `local-scores/` peut enrichir la bibliothèque en développement ; il est ignoré par Git et absent des exports publics. Sans ce dossier, seule la partition publique est proposée. On peut aussi importer un fichier `.musicxml`, `.xml` ou `.mxl`.
+Open <http://localhost:5178>. The client works without the synchronization server.
 
-**Une souris verte** : premier couplet, 17 mesures, sol majeur, noire = 78. La partie « Chant » est indépendante du piano ; coupez-la dans « Voix & instruments » pour chanter sur le piano seul. La mélodie va de ré4 à ré5 ; la transposition audio de −12 demi-tons permet de travailler une octave plus bas. L’accompagnement a été créé pour ce POC à partir de la [transcription de la mélodie traditionnelle](https://fr.wikipedia.org/wiki/Une_souris_verte_(chanson)).
+Import a `.musicxml`, `.xml` or `.mxl` file, or use the included **Une souris verte** arrangement for voice and piano. An optional private corpus in `local-scores/` is available only during development. It is ignored by Git and excluded from public exports; a fresh clone needs no such directory.
 
-## Compiler et essayer hors ligne
+### A simple singing exercise
+
+**Une souris verte** contains the first verse, 17 bars, in G major at 78 BPM. Its “Chant” part is separate from the piano: mute that part in **“Voix & instruments”** to sing with piano accompaniment alone.
+
+The melody ranges from D4 to D5. Set the voice part to **−12 semitones** to practice an octave lower. Transposition changes playback and the expected pitch, while the written notation stays unchanged.
+
+The arrangement uses a [transcription of the traditional melody](https://fr.wikipedia.org/wiki/Une_souris_verte_(chanson)) with a simple original piano accompaniment. Attribution and CC BY-SA 4.0 licensing are included in the MusicXML and [third-party credits](THIRD_PARTY.md).
+
+## Practice controls
+
+Use **“Passage”** to choose the first and last notes of a passage. Its switch enables or disables repetition. **“Voix & instruments”** selects the target voice and controls each part's volume, mute/solo, instrument and transposition.
+
+**“Écouter ma voix”** starts microphone pitch tracking. Headphones help isolate your voice from the accompaniment. The measured pitch is displayed as a note, a deviation in cents and a trace over the score. Expected score notes are never used to correct the detected pitch.
+
+In Piano view, click the keyboard to focus it, then use the indicated computer keys. AZERTY and QWERTY layouts use the same physical key positions; the computer-keyboard register can be moved by octaves. Hold several keys for chords or slide between keys. The arrows and recenter buttons navigate the 88-key range. **“Clavier”** opens a compact keyboard below the score on larger screens.
+
+The piano has its own instrument on the same AudioContext and can be played during accompaniment playback. Per-part volume, mute, instrument and transposition settings do not alter manually played keys. Microphone analysis tracks one pitch at a time; it does not recognize chords.
+
+| Shortcut | Action |
+| --- | --- |
+| Space | Play / pause |
+| Left / right arrow | Previous / next note |
+| L | Select a passage |
+| F | Full screen |
+| Escape | Cancel a selection, close panels or release piano keys |
+
+## Record a take
+
+Select **“Enregistrer un essai”**. The microphone starts, a three-second count-in prepares the entrance, then playback begins at the selected position. Score following is enabled automatically.
+
+Select **“Arrêter l’essai”** to stop, including from the floating landscape control. Reaching the end of the score also stops recording. Wait for saving to finish before reloading or closing the page.
+
+Takes remain on the device in IndexedDB (`chansonade`, store `takes`). They contain an uncompressed mono WAV, confirmed pitch observations, practice settings and transport timing. The count-in is included in the audio and identified separately in the metadata.
+
+- **“Réécouter”** opens the latest take for playback.
+- **“Exporter l’essai”** downloads a ZIP containing `voice.wav`, `analysis.json` and `score.musicxml`.
+- Recordings and their analysis are **never uploaded**, including when account synchronization is enabled.
+
+Under **“Voix & instruments → Retour de voix”**, choose the microphone input. Browser-requested audio processing is disabled, but system-level noise cancellation can still affect the signal. The selected input's name and settings are included in take metadata. Exported takes therefore contain personal audio and metadata; share them deliberately.
+
+### How pitch tracking works
+
+The WAV records the raw input. Only the analysis branch receives a narrow 50 Hz notch filter, retained for mains interference observed during testing. An 85 ms analysis window produces multiple probabilistic YIN candidates. A single temporal decoder selects a measured pitch or an unvoiced state; it does not apply a separate median filter or snap measurements to score notes.
+
+The dashed end of the trace shows the same decoder's provisional path. Subsequent windows confirm it into a solid trace. Only confirmed observations are saved. Capture timestamps are mapped to score time using transport history, then projected onto the staff's clef and geometry. Zoom and rotation change that projection rather than the acoustic observations.
+
+This is a bounded-latency adaptation for live use, not an identical implementation of offline pYIN. Timing depends on the browser and device. See [the architecture](docs/ARCHITECTURE.md), [`pitch-config.ts`](src/lib/pitch-config.ts), [`pitch-detector.ts`](src/lib/pitch-detector.ts) and [`pitch-tracker.ts`](src/lib/pitch-tracker.ts) for the pipeline, parameters and source attribution.
+
+## Local data and optional synchronization
+
+Imported scores, per-score settings and pending synchronization changes are stored in IndexedDB, separately for each account and the anonymous library. Device-specific preferences stay in localStorage. Clearing site data removes that browser's local library and recordings.
+
+Signing in adds synchronization of scores and practice settings. Moving the anonymous library into an account requires an explicit action. Microphone selection, microphone timing adjustment, display preferences and recorded takes stay on the device.
+
+The synchronization service is a **separate private project**. The client uses a same-origin JSON API under `api/v1/`, relative to its deployment path. Server revisions detect conflicts; mutation IDs support retries; deletion markers prevent an older device from silently restoring deleted data. Both versions of a conflict are retained until the user chooses one.
+
+Existing data from the app's previous name is migrated on the same origin without deleting the original copies or overwriting newer Chansonade records. Browser data belongs to an origin: moving to a different domain requires account synchronization or export/import.
+
+## Build and use offline
 
 ```sh
 npm run build
 npm run preview
 ```
 
-Ouvrir l’adresse affichée par Vite, puis laisser la première ouverture terminer le chargement et la mise en cache. Le service worker de production conserve l’application, les moteurs, les polices, la banque de sons et les exemples publics pour les prochaines ouvertures hors ligne. Il est limité au chemin de l’application et ne met jamais en cache les comptes ou l’API. Une mise à jour attend la fermeture des anciens onglets pour préserver les prises en cours. Il n’est pas activé en développement ; sa génération est intégrée à la commande `build`.
+Open the address printed by Vite and let the first load and cache installation complete. The production service worker caches the app, engines, fonts, SoundFont and public sample for later offline use. It is disabled in development.
 
-Les partitions importées, réglages par morceau et changements de synchronisation sont conservés dans IndexedDB (schéma v4), séparément pour chaque compte et la bibliothèque anonyme. Les préférences propres à l’appareil restent dans localStorage. Les données du précédent nom sont reprises automatiquement au premier lancement de Chansonade sur la même adresse : partitions, prises WAV et réglages. Les copies d’origine sont conservées et les données Chansonade déjà présentes ne sont pas écrasées. Effacer les données du site supprime cette bibliothèque locale ; le bouton d’export restitue le MusicXML original.
+The cache is restricted to the app's path and never stores account or API responses. Source archives are downloaded on demand rather than precached. Updates wait for existing tabs to close so an active take is not interrupted.
 
-## Utiliser
+The build also creates a matching source bundle and third-party notices in `dist/source/` and `dist/legal/`. The first build may download pinned upstream archives; later builds reuse verified cached copies. See [source and rebuild instructions](docs/SOURCES.md).
 
-Le bouton de thème permet de choisir **Jour**, **Nuit** ou **Système**. Le choix reste sur cet appareil ; le mode Système suit les préférences du navigateur. La partition adapte également son papier et sa gravure au thème nuit, en conservant des repères de lecture et de hauteur distincts.
-
-- **Partition** : lecture verticale avec suivi du système courant.
-- **Ruban** : système horizontal continu ; le glissement est interpolé entre les mesures et lissé, séparément du surlignage des notes.
-- **Auto** : sur téléphone, partition en portrait et ruban immersif en paysage. Un choix manuel prend priorité sur l’orientation.
-- **Piano** : clavier interactif de 88 notes, avec les notes de la voix cible en bleu, l’accompagnement en violet clair, vos appuis en violet et la hauteur du micro en magenta. Le repère micro indique aussi les écarts entre deux touches. Les notes de la partition suivent les transpositions audio ; les touches jouées restent à leur hauteur réelle.
-- Lecture/pause, tempo, navigation par note, zoom et déplacement par clic dans la partition.
-- **Passage** : cliquer la première puis la dernière note, activer ou désactiver la répétition avec l’interrupteur.
-- **Voix & instruments** : voix cible, volume, mute/solo, son et transposition audio par partie.
-- **Écouter ma voix** : hauteur détectée, écart en cents et courbe sur la portée pendant la lecture. Un casque permet de mieux isoler le chant.
-- Clavier de référence, import local, réglages mémorisés et export de la partition originale.
-
-Dans le mode Piano, jouer à la souris, en multitouch ou avec les touches de l’ordinateur : cliquer le clavier pour lui donner le focus, puis utiliser les lettres indiquées sur les touches. Les dispositions AZERTY et QWERTY correspondent aux mêmes positions physiques ; le registre PC se règle par octave. Maintenir plusieurs touches produit un accord, glisser d’une touche à l’autre est possible. Espace garde la lecture/pause et Échap relâche les notes. Les flèches et boutons de recentrage permettent de parcourir les 88 touches et de retrouver la partition ou la voix. Le bouton **Clavier** conserve une version compacte sous la partition sur grand écran.
-
-Le piano possède son propre instrument et peut être joué pendant la lecture ; les réglages de volume, son, mute et transposition des parties ne modifient pas les touches que vous jouez. Le micro utilise le même suivi de hauteur réactif que la courbe. Il indique une hauteur à la fois ; il ne reconnaît pas les accords captés au micro.
-
-Raccourcis : **Espace** lecture/pause, **← / →** note précédente/suivante, **L** sélection du passage, **F** plein écran, **Échap** annulation/fermeture des panneaux.
-
-## Enregistrer un essai
-
-Cliquer **Enregistrer un essai** : le micro démarre, un compte à rebours de trois secondes prépare le départ, puis le morceau joue depuis la position choisie. Le suivi se réactive au démarrage. Chanter avec un casque permet d’isoler la voix de l’accompagnement.
-
-Cliquer **Arrêter l’essai**, y compris sur le bouton flottant en paysage ; la fin du morceau arrête aussi la prise. Attendre la sauvegarde avant de recharger ou fermer la page. Le WAV mono sans compression, les résultats bruts de détection (y compris les rejets), les réglages et les repères temporels sont conservés localement dans IndexedDB, base `chansonade`, table `takes`. Le compte à rebours est inclus dans l’audio et distingué de la lecture dans les données.
-
-**Réécouter** ouvre le dernier essai dans le panneau. **Exporter l’essai** fournit une archive ZIP contenant `voice.wav`, `analysis.json` et `score.musicxml`. Aucun envoi vers un serveur. Ces données servent à comparer les erreurs du détecteur avec le son ; elles ne supposent pas que les notes chantées sont justes.
-
-Dans **Voix & instruments → Retour de voix**, choisir l’entrée microphone permet de comparer une entrée physique avec une source système qui applique une réduction de bruit. Les traitements demandés au navigateur sont désactivés ; cela ne contourne pas ceux déjà appliqués par le système. Le nom et les réglages de l’entrée sont inclus dans les nouveaux essais.
-
-L’analyse et le dessin suivent une seule chaîne :
-
-1. **Capture** : le WAV garde l’entrée brute. Seule la branche d’analyse reçoit le rejet étroit du parasite secteur à 50 Hz, conservé pour le bruit réellement observé dans les prises.
-2. **Observations acoustiques** : une fenêtre de 85 ms, quelle que soit la fréquence d’échantillonnage, produit plusieurs candidats de périodicité YIN avec les probabilités de seuil de pYIN. La différence quadratique utilise les deux bords de fenêtre pour conserver la précision du registre grave.
-3. **Décision temporelle** : un unique décodeur choisit un candidat mesuré ou l’état non voisé. Il remplace entièrement la médiane, les relâchements de seuil et les suppressions de pics précédents. Son anticipation est fixe ; les changements de registre ont un coût souple et restent possibles.
-4. **Placement** : le temps de capture est converti en temps musical avec l’historique du transport. La hauteur est projetée sur la portée selon sa clé et son armure ; un même axe temporel inclut notes et silences. Les mesures sont reprojetées après zoom ou rotation. La note attendue sert seulement à calculer l’écart de justesse.
-
-La **fin en pointillés** montre immédiatement le chemin courant du même décodeur, encore révisable. Elle suit la fenêtre audio la plus récente, avec environ **40–80 ms** de délai de capture/analyse dans le navigateur de validation. Les cinq fenêtres suivantes confirment progressivement cette fin : elle devient pleine et définitive après environ **185 ms**, plus le bloc de capture et le calcul. Les temps des points restent ceux du son capté ; aucun décalage artificiel vers l’avant, aucune prédiction de la voix et aucun second détecteur. Seuls les points confirmés entrent dans l’essai sauvegardé. Ce fonctionnement ne ralentit ni la lecture ni le ruban. Aucun point n’est inventé dans un silence et aucune note attendue n’entre dans le détecteur. La fin du décodeur est vidée avant de sauvegarder les métadonnées ; une erreur d’analyse conserve le WAV avec l’indication d’une courbe incomplète.
-
-Le modèle temporel est une adaptation pour le temps réel, pas une implémentation identique de pYIN hors ligne. Les principes et paramètres sont documentés dans `src/lib/pitch-detector.ts`, `pitch-tracker.ts` et le fichier commun `pitch-config.ts`. Les références sont [pYIN, Mauch et Dixon (2014)](https://webspace.eecs.qmul.ac.uk/s.e.dixon/pub/2014/MauchDixon-PYIN-ICASSP2014.pdf), l’implémentation [librosa](https://github.com/librosa/librosa) et les méthodes de suivi de [Praat](https://www.fon.hum.uva.nl/praat/manual/pitch_analysis_by_raw_autocorrelation.html).
-
-## Structure
-
-Svelte + TypeScript + Vite. Verovio WebAssembly calcule le SVG, le MIDI et les repères temporels dans un Worker. SpessaSynth assure la synthèse SoundFont ; Un autre Worker extrait les candidats YIN avec la FFT de Pitchy et les suit dans le temps, à partir des fenêtres horodatées d’un AudioWorklet. Les bibliothèques sont reliées par quelques modules dans `src/lib/`.
-
-## Limites du POC
-
-- Le vrai plein écran nécessite un geste utilisateur ; le paysage propose déjà une interface immersive.
-- Le micro nécessite HTTPS ou `localhost`. Une adresse HTTP du réseau local permet d’ouvrir la partition mais peut bloquer le micro.
-- La transposition change le son et la hauteur attendue, pas les notes gravées.
-- Les bornes A–B sont surveillées par la boucle d’animation : la reprise peut être décalée d’une image au premier plan et n’est pas garantie en arrière-plan.
-- La conversion MusicXML dépend de Verovio ; reprises complexes et notations particulières restent à vérifier sur les fichiers concernés.
-- Une émulation mobile dans Chrome permet de vérifier les formats portrait/paysage ; elle ne valide pas le comportement audio d’un véritable téléphone ou de Safari.
-
-La banque locale **TimGM6mb** provient de `/usr/share/sounds/sf2/TimGM6mb.sf2` et est distribuée sous GPL version 2. Les crédits et licences des composants sont indiqués dans [THIRD_PARTY.md](THIRD_PARTY.md).
-
-
-## Client libre et serveur de synchronisation
-
-Le code propre au client est sous **GPL-3.0-only**, copyright © 2026 Les contributeurs de Chansonade ; les composants tiers et ressources conservent les licences décrites dans `THIRD_PARTY.md`. Le build publie une archive du code source correspondant, les notices et les sources tierces dans `dist/source/` et `dist/legal/`. Ces archives sont téléchargeables depuis l’aide, sans téléchargement automatique par le cache hors ligne.
-
-Le serveur privé est un projet et un dépôt Git distincts, dans `../chansonade-server`. Le client reste utilisable sans compte. La connexion ajoute la synchronisation des partitions importées et des réglages de répétition. Les entrées microphone, le décalage micro, les préférences d’affichage et les prises audio restent propres à l’appareil. La bibliothèque anonyme n’est envoyée qu’après une action explicite ; les données et modifications en attente sont isolées par compte.
-
-La synchronisation utilise une API HTTPS JSON sous `api/v1/`, relative au chemin du client. Les révisions serveur détectent les conflits, les identifiants de mutation permettent les retries et les suppressions sont conservées sous forme de marqueurs. Un conflit conserve les deux versions jusqu’au choix de l’utilisateur.
-
-## Déploiement sous un chemin
+### Deploy under a subpath
 
 ```sh
-CHANSONADE_BASE_PATH=/projects/chansonade/ npm run build
+CHANSONADE_BASE_PATH=/projects/chansonade/ \
+VITE_REPOSITORY_URL=https://github.com/chansonade/chansonade \
+npm run build
 ```
 
-La version Forge est exposée sur `https://nafis.io/projects/chansonade/`. Le client compilé est distinct du serveur et de ses données privées. Le proxy nginx transmet seulement le sous-chemin `api/` au service local de synchronisation. La configuration et la procédure serveur se trouvent dans le dossier `deploy/` du projet serveur.
-
-Pour un futur domaine dédié, compiler avec la base `/` (valeur par défaut), puis adapter l’origine et le chemin de cookie du serveur. Les données locales du navigateur sont propres à une origine : exporter/importer la bibliothèque ou utiliser le compte permettra de la retrouver sur le nouveau domaine.
-
-
-## Contribuer et publier le client
-
-Voir [CONTRIBUTING.md](CONTRIBUTING.md) pour démarrer et choisir une vérification utile, [l’architecture](docs/ARCHITECTURE.md) pour la carte des modules, et [les sources et licences](docs/SOURCES.md) pour reconstruire une version distribuée.
-
-Le dépôt de travail d’origine a conservé un historique privé de partitions. Pour préparer un dépôt public, utiliser [l’export sans historique](docs/PUBLISHING.md) :
+Serve `dist/` over HTTPS. The default base path is `/`; for a subpath preview, use the same base when starting Vite:
 
 ```sh
-node scripts/export-public.mjs ../chansonade-public
+CHANSONADE_BASE_PATH=/projects/chansonade/ npm run preview
 ```
 
-L’export préserve le dépôt de travail et n’envoie rien en ligne. Le code du client est GPL-3.0-only ; les ressources et le logo ont des conditions distinctes décrites dans [THIRD_PARTY.md](THIRD_PARTY.md).
+`VITE_REPOSITORY_URL` sets the repository link in the interface. Without it, the button downloads the local source archive. If synchronization is enabled, proxy the app-relative `api/` path to its separately deployed service and configure that service's origin and cookie path accordingly.
 
-Le lien de dépôt dans l’interface se configure au build avec `VITE_REPOSITORY_URL`. Sans cette option, le bouton télécharge directement les sources de la version servie.
+## Implementation and limitations
+
+The client uses **Svelte, TypeScript and Vite**. **Verovio WebAssembly** renders SVG notation and generates MIDI and timing in a Worker. **SpessaSynth** provides SoundFont synthesis. A separate Worker analyzes timestamped AudioWorklet windows using YIN candidates and Pitchy's FFT.
+
+Current limitations include:
+
+- Microphone access requires HTTPS or `localhost`. Plain HTTP on a local-network address can prevent microphone access.
+- True full screen requires a user gesture; landscape mode already provides an immersive layout.
+- Transposition affects audio and expected pitch, not the engraved notes.
+- A–B loop boundaries are monitored by the animation loop; restart timing can vary by a frame in the foreground and is not guaranteed in background tabs.
+- Complex MusicXML repeats and uncommon notation depend on Verovio and need checking on the relevant files.
+- Browser viewport emulation checks layout, not audio behavior on real phones or Safari.
+
+## Contributing and licensing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md), [the module map](docs/ARCHITECTURE.md) and [publication instructions](docs/PUBLISHING.md). These additional documents are currently in French.
+
+The original client code is licensed under **GPL-3.0-only**, copyright © 2026 Chansonade contributors. Libraries and assets retain their own licenses. The bundled TimGM6mb SoundFont is GPL version 2; the sample arrangement is CC BY-SA 4.0. The Chansonade and GitHub logos have separate terms and are not covered by the client's GPL. See [LICENSE](LICENSE) and [THIRD_PARTY.md](THIRD_PARTY.md).
+
+The public repository was created from a clean export. The original private working history and local score corpus are not part of it. To prepare a new public snapshot from a private working tree, use `scripts/export-public.mjs` as described in the publication instructions.
