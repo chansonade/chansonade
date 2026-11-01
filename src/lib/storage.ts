@@ -465,10 +465,10 @@ export async function resolveSyncConflict(scope: string, kind: ResourceKind, id:
 export async function claimAnonymousLibrary(scope: string): Promise<number> {
   if (scope === ANONYMOUS_SCOPE) return 0;
   const connection = await db();
-  const local = await requestValue<LocalResource[]>(connection.transaction('resources').objectStore('resources').index('scope').getAll(ANONYMOUS_SCOPE));
   let count = 0;
   await transaction(connection, ['resources', 'outbox', 'meta'], 'readwrite', async (tx) => {
     const resources = tx.objectStore('resources'), outbox = tx.objectStore('outbox');
+    const local = await requestValue<LocalResource[]>(resources.index('scope').getAll(ANONYMOUS_SCOPE));
     for (const source of local) {
       resources.delete(key(ANONYMOUS_SCOPE, source.kind, source.id));
       if (source.deleted) continue;

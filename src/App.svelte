@@ -261,7 +261,7 @@
       renderedSignature = requestedSignature;
       await installPages(result.pages);
       if (revision !== openRevision) return;
-      if (mobile) libraryOpen = false;
+      libraryOpen = false;
       busy = false;
       if (`${mode}:${viewportWidth}:${viewportHeight}:${zoom}` !== requestedSignature) await relayout();
       audioBusy = true;
