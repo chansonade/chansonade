@@ -87,7 +87,7 @@ La banque locale **TimGM6mb** provient de `/usr/share/sounds/sf2/TimGM6mb.sf2` e
 
 ## Client libre et serveur de synchronisation
 
-Le code propre au client est sous **GPL-3.0-only** ; les composants tiers et ressources conservent les licences décrites dans `THIRD_PARTY.md`. Le build publie une archive du code source correspondant, les notices et les sources tierces dans `dist/source/` et `dist/legal/`. Ces archives sont téléchargeables depuis l’aide, sans téléchargement automatique par le cache hors ligne.
+Le code propre au client est sous **GPL-3.0-only**, copyright © 2026 Les contributeurs de Chansonade ; les composants tiers et ressources conservent les licences décrites dans `THIRD_PARTY.md`. Le build publie une archive du code source correspondant, les notices et les sources tierces dans `dist/source/` et `dist/legal/`. Ces archives sont téléchargeables depuis l’aide, sans téléchargement automatique par le cache hors ligne.
 
 Le serveur privé est un projet et un dépôt Git distincts, dans `../chansonade-server`. Le client reste utilisable sans compte. La connexion ajoute la synchronisation des partitions importées et des réglages de répétition. Les entrées microphone, le décalage micro, les préférences d’affichage et les prises audio restent propres à l’appareil. La bibliothèque anonyme n’est envoyée qu’après une action explicite ; les données et modifications en attente sont isolées par compte.
 
