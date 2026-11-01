@@ -17,7 +17,7 @@ micro. Le serveur de comptes et de synchronisation est facultatif et indépendan
 | `lib/pitch.ts`, `lib/wav.ts` | Session micro, capture, échanges avec le Worker et assemblage du WAV. |
 | `lib/pitch-detector.ts`, `lib/pitch-tracker.ts`, `lib/pitch-worker.ts` | Candidats YIN probabilistes, décision temporelle et exécution dans un Worker. Paramètres communs dans `lib/pitch-config.ts`. |
 | `lib/timeline.ts`, `lib/projection.ts` | Correspondance entre horloge de capture et transport, puis projection de la hauteur mesurée sur les portées. |
-| `lib/storage.ts`, `lib/sync.ts`, `lib/take-sync.ts` | Persistance locale, file de mutations et synchronisation par compte. `AccountPanel.svelte` présente les actions de compte et les conflits. |
+| `lib/storage.ts`, `lib/sync.ts`, `lib/take-sync.ts` | Persistance locale, file de mutations et synchronisation automatique par compte. `AccountPanel.svelte` présente la connexion et son état. |
 | `lib/theme.ts`, `lib/ThemeToggle.svelte` | Préférence système/clair/sombre et application de `data-theme` au document. |
 
 Les styles communs sont dans `style.css`, les styles propres aux composants dans
@@ -66,14 +66,15 @@ d'appareil, le dernier morceau et l'identité de compte mise en cache.
 Bibliothèque, réglages, mutations et curseur de synchronisation sont isolés par
 scope : `anonymous` ou `user:<id>`. Une modification et sa mutation sont écrites
 dans la même transaction. Une mutation envoyée reste immuable jusqu'à sa réponse ;
-les nouvelles modifications attendent la suivante. Les conflits conservent les
-deux versions jusqu'au choix de la personne. Une arrivée distante ne remplace pas
+les nouvelles modifications attendent la suivante. Les modifications locales en
+attente sont réessayées automatiquement en cas de concurrence ; l'autre version
+est sauvegardée localement. Une arrivée distante ne remplace pas
 les réglages d'une répétition déjà commencée.
 
 `sync.ts` utilise l'API JSON relative `api/v1/`, vérifie la session et lie les
-requêtes au compte concerné. L'ajout de la bibliothèque anonyme au compte est
-explicite. Les prises anonymes sont déplacées atomiquement vers le premier compte
-utilisé, jamais copiées vers les suivants. Les prises de compte sont synchronisées
+requêtes au compte concerné. Les partitions, réglages et prises encore sans compte
+sont déplacés automatiquement vers le compte connecté. Les données déjà attribuées
+à un autre compte restent isolées. Les prises de compte sont synchronisées
 automatiquement : déclaration JSON, WAV binaire vérifié par SHA-256, puis
 téléchargement sur les autres appareils. Les tombstones empêchent leur résurrection ;
 un transfert interrompu est repris et la synchronisation est suspendue pendant

@@ -3,7 +3,7 @@ import {readFile} from 'node:fs/promises';
 import ts from 'typescript';
 const source=await readFile(new URL('../src/lib/take-playback.ts',import.meta.url),'utf8');
 const {outputText}=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}});
-const {takeMoment,takePitchSamples,takePitchCount}=await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
+const {takeMoment,takePitchSamples,takePitchCount,takeTraceStarts}=await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
 const take={settings:{rate:1,target:0,parts:[{channel:0,transpose:-12}]},transport:[
  {time:0,scoreTime:3,playing:false,rate:1,targetChannel:0,transpose:-12},
  {time:3,scoreTime:3,playing:true,rate:1,targetChannel:0,transpose:-12},
@@ -29,4 +29,10 @@ assert.equal(samples[4].epoch,12);assert.equal(samples[4].staff,2);assert.equal(
 assert.equal(samples[0].frequency,220,'measured pitch retained');
 assert.equal(takePitchCount(samples,3),0);assert.equal(takePitchCount(samples,5.1),3);assert.equal(takePitchCount(samples,100),5);
 assert.equal(takeMoment({...take,transport:[]},0).playing,false);
+const longPassage=Array.from({length:2500},(_,index)=>({...samples[0],captureTime:index/35,scoreTime:index/35}));
+const starts=takeTraceStarts(longPassage);
+assert.equal(starts.at(-1),0,'a long passage retains its first pitch point');
+assert.equal(longPassage.slice(starts.at(-1),takePitchCount(longPassage,100)).length,2500,'no 800-point rolling cutoff');
+longPassage.push({...samples[0],captureTime:100,scoreTime:0});
+assert.equal(takeTraceStarts(longPassage).at(-1),2500,'a backwards score jump starts a new trace');
 console.log('PASS recorded playback: count-in, pause, loop, tempo, original pitch/staff/transpose and seeking');

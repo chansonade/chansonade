@@ -203,16 +203,12 @@ export async function deleteTake(id: string, scope = activeScope) {
   changed(scope, 'write');
 }
 
-/** Claim anonymous takes once, for the first account only; move atomically. */
+/** Move unassigned takes into the signed-in account without copying other accounts. */
 export async function claimAnonymousTakes(scope: string) {
   if (scope === ANONYMOUS_SCOPE) return;
   const connection = await db();
   let moved = false;
-  await transaction(connection, ['takeData', 'takeIndex', 'meta'], 'readwrite', async tx => {
-    const meta = tx.objectStore('meta');
-    const owner = await requestValue<string | undefined>(meta.get('takes-anonymous-owner'));
-    if (owner && owner !== scope) return;
-    meta.put(scope, 'takes-anonymous-owner');
+  await transaction(connection, ['takeData', 'takeIndex'], 'readwrite', async tx => {
     const index = tx.objectStore('takeIndex'), data = tx.objectStore('takeData');
     const records = await requestValue<TakeIndex[]>(index.index('scope').getAll(ANONYMOUS_SCOPE));
     for (const record of records) {
@@ -451,12 +447,13 @@ export async function syncConflicts(scope: string): Promise<LocalResource[]> {
 }
 export async function resolveSyncConflict(scope: string, kind: ResourceKind, id: string, keepLocal: boolean) {
   const connection = await db();
-  await transaction(connection, ['resources', 'outbox'], 'readwrite', async (tx) => {
+  await transaction(connection, ['resources', 'outbox', 'meta'], 'readwrite', async (tx) => {
     const resources = tx.objectStore('resources'), outbox = tx.objectStore('outbox');
     const recordKey = key(scope, kind, id);
     const record = await requestValue<LocalResource | undefined>(resources.get(recordKey));
     if (!record?.conflict) return;
     const remote = record.conflict;
+    tx.objectStore('meta').put(keepLocal ? remote : { kind, id, data: record.data, revision: record.revision, deleted: record.deleted }, `sync.backup.${scope}.${kind}.${id}.${remote.revision}`);
     record.conflict = null; record.revision = remote.revision; record.change++;
     record.dirty = keepLocal;
     if (keepLocal) outbox.put(queueFor(record));
@@ -465,24 +462,25 @@ export async function resolveSyncConflict(scope: string, kind: ResourceKind, id:
   });
   changed(scope, 'write');
 }
-export async function importAnonymousLibrary(scope: string): Promise<number> {
+export async function claimAnonymousLibrary(scope: string): Promise<number> {
   if (scope === ANONYMOUS_SCOPE) return 0;
   const connection = await db();
   const local = await requestValue<LocalResource[]>(connection.transaction('resources').objectStore('resources').index('scope').getAll(ANONYMOUS_SCOPE));
   let count = 0;
-  await transaction(connection, ['resources', 'outbox'], 'readwrite', async (tx) => {
+  await transaction(connection, ['resources', 'outbox', 'meta'], 'readwrite', async (tx) => {
     const resources = tx.objectStore('resources'), outbox = tx.objectStore('outbox');
     for (const source of local) {
+      resources.delete(key(ANONYMOUS_SCOPE, source.kind, source.id));
       if (source.deleted) continue;
       const recordKey = key(scope, source.kind, source.id);
       const existing = await requestValue<LocalResource | undefined>(resources.get(recordKey));
       if (existing && JSON.stringify(existing.data) === JSON.stringify(source.data) && !existing.deleted) continue;
-      // Import is explicit; if both libraries already contain different values,
-      // retain both and let the person choose rather than silently replace one.
+      // Pending local edits take precedence; retain the other version locally.
       if (existing) {
         const remote: RemoteResource = existing.conflict || { kind: existing.kind, id: existing.id, data: existing.data, deleted: existing.deleted, revision: existing.revision };
-        resources.put({ ...existing, data: source.data, deleted: false, dirty: true, change: existing.change + 1, conflict: remote });
-        outbox.delete(recordKey);
+        tx.objectStore('meta').put(remote, `sync.backup.${scope}.${source.kind}.${source.id}.${remote.revision}`);
+        const record = { ...existing, data: source.data, deleted: false, dirty: true, change: existing.change + 1, conflict: null };
+        resources.put(record); outbox.put(queueFor(record));
       } else {
         const record = { ...source, scope, revision: 0, dirty: true, change: 1, conflict: null };
         resources.put(record); outbox.put(queueFor(record));
@@ -490,6 +488,6 @@ export async function importAnonymousLibrary(scope: string): Promise<number> {
       count++;
     }
   });
-  changed(scope, 'write');
+  if (count) changed(scope, 'write');
   return count;
 }

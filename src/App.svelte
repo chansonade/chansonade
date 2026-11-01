@@ -10,7 +10,7 @@
   import RepositoryLink from './lib/RepositoryLink.svelte';
   import Brand from './lib/Brand.svelte';
   import TakePanel from './lib/TakePanel.svelte';
-  import { takeMoment, takePitchSamples, takePitchCount } from './lib/take-playback';
+  import { takeMoment, takePitchSamples, takePitchCount, takeTraceStarts } from './lib/take-playback';
   import { measuresInLoop, canonicalLoopBounds } from './lib/loop';
   import { syncState, startSync, setTakeSyncPaused } from './lib/sync';
   import { PitchInput, type PitchResult } from './lib/pitch';
@@ -106,13 +106,13 @@
   let replayAudio = $state<HTMLAudioElement>();
   let replayPosition = $state(0);
   let replaySamples = $state<PitchSample[]>([]);
+  const replayTraceStarts = $derived(takeTraceStarts(replaySamples));
   let replayRequest = 0;
   const replayMoment = $derived(replayTake ? takeMoment(replayTake, replayPosition) : null);
   const replayVisibleSamples = $derived.by(() => {
     if (!replayTake) return [];
     const end = takePitchCount(replaySamples, replayPosition);
-    const epoch = replaySamples[end - 1]?.epoch;
-    return replaySamples.slice(Math.max(0, end - 800), end).filter(sample => sample.epoch === epoch);
+    return replaySamples.slice(replayTraceStarts[end - 1] || 0, end);
   });
   let takeCapture: { scope: string; startedAt: number; createdAt: number; scoreId: string; title: string; scoreXML: string; settings: PracticeSettings; latencyMs: number; pitches: TakePitch[]; transport: TakeTransport[] } | null = null;
   let takeRequest = 0;
@@ -417,6 +417,7 @@
     playing = replayTake ? !!replayAudio && !replayAudio.paused && !replayAudio.ended : audio.playing;
     if (replayTake && now - lastUI > 30) replayPosition = replayTime;
     if (pitch?.active) captureTimeline.observe(pitch.currentTime, time, rate, playing, looped);
+    if (!replayTake && (looped || time < previousTime - 0.08)) clearPitchTrace();
     if (takeCapture && (looped || now - lastTakeTransport >= 100)) {
       takeSeconds = Math.max(0, pitch.currentTime - takeCapture.startedAt);
       takeCapture.transport.push({ time: takeSeconds, scoreTime: time, playing, rate, targetChannel, transpose: parts.find((p) => p.channel === targetChannel)?.transpose || 0 });
@@ -443,11 +444,13 @@
   }
   function seek(time: number) {
     if (replayTake) stopReplay();
+    const backwards = time < position - 0.001;
     audio.seek(time);
     observeTransport(true);
     position = time;
     previousTime = time;
-    clearPitchTrace();
+    if (backwards) clearPitchTrace();
+    else pendingPitchSamples = [];
     updateVisual(time, 0.016, true);
   }
   function restart() { audio.stop(); setFollow(true); seek(loopEnabled && loopA !== null ? loopA : 0); }
@@ -608,7 +611,7 @@
     if (takeCapture && result.time >= takeCapture.startedAt) {
       takeCapture.pitches.push({ time: result.time - takeCapture.startedAt, frequency: result.frequency, rawFrequency: result.rawFrequency ?? result.frequency, clarity: result.clarity, rms: result.rms, midi: result.midi, cents: result.cents, scoreTime: sample.scoreTime, expectedPitch: note ? note.pitch + transpose : null, noteId: note?.id || null, targetChannel, playing: sample.playing, staff: sample.staff, transpose: sample.transpose, epoch: sample.epoch });
     }
-    if (visibleSample(sample)) pitchSamples = [...pitchSamples.slice(-799), sample];
+    if (visibleSample(sample)) pitchSamples.push(sample);
   }
   function receivePreview(results: PitchResult[]) {
     if (disposed) return;

@@ -1,6 +1,6 @@
 import { writable } from 'svelte/store';
 import { synchronizeTakes, TakeAPIError } from './take-sync';
-import { takeSyncEntries, ANONYMOUS_SCOPE, storageScope, setStorageScope, subscribeStorage, pendingMutations, markMutationSent, releaseRejectedMutation, acceptMutation, applyRemoteChanges, syncCursor, syncConflicts, resolveSyncConflict, importAnonymousLibrary, type LocalResource, type RemoteResource, type ResourceKind } from './storage';
+import { takeSyncEntries, ANONYMOUS_SCOPE, storageScope, setStorageScope, subscribeStorage, pendingMutations, markMutationSent, releaseRejectedMutation, acceptMutation, applyRemoteChanges, syncCursor, syncConflicts, resolveSyncConflict, claimAnonymousLibrary, type LocalResource, type RemoteResource } from './storage';
 
 type User = { id: string; email: string };
 type Session = { user: User | null; registration: 'invite' | 'open' };
@@ -88,6 +88,12 @@ async function cycle() {
     controller = new AbortController();
     const signal = controller.signal;
     const current = () => !stopped && currentEpoch === epoch && !authChanging && !recordingPaused;
+    await claimAnonymousLibrary(scope);
+    if (!current()) return;
+    for (const conflict of await syncConflicts(scope)) {
+      if (!current()) return;
+      await resolveSyncConflict(scope, conflict.kind, conflict.id, true);
+    }
     // One score at a time keeps large MusicXML uploads within the API limit.
     // Settings are small too; a serial queue is enough for this POC.
     for (const mutation of await pendingMutations(scope)) {
@@ -104,13 +110,20 @@ async function cycle() {
         throw cause;
       }
       if (!current()) return;
-      for (const result of response.results) await acceptMutation(scope, result.mutationId, result.status, result.resource);
+      for (const result of response.results) {
+        await acceptMutation(scope, result.mutationId, result.status, result.resource);
+        if (result.status === 'conflict') await resolveSyncConflict(scope, result.resource.kind, result.resource.id, true);
+      }
     }
     if (!current()) return;
     const cursor = await syncCursor(scope);
     const response = await request<{ cursor: number; changes: RemoteResource[] }>(`changes?cursor=${cursor}`, {}, account, signal);
     if (!current()) return;
     await applyRemoteChanges(scope, response.changes, response.cursor);
+    for (const conflict of await syncConflicts(scope)) {
+      if (!current()) return;
+      await resolveSyncConflict(scope, conflict.kind, conflict.id, true);
+    }
     if (!current()) return;
     await synchronizeTakes(scope, account.id, signal, current);
     if (!current()) return;
@@ -124,7 +137,6 @@ async function cycle() {
     if (stopped || authChanging || recordingPaused || failedEpoch !== epoch) return;
     // A rejected take stays pending, but retries must not spin at 300 ms.
     again = false;
-    if (user) await refreshCounts(storageScope()).catch(() => {});
     if ((cause instanceof APIError || cause instanceof TakeAPIError) && (cause.status === 401 || cause.status === 403)) {
       update({ status: 'Connexion requise', message: 'La session a changé. Reconnectez le compte pour synchroniser.' });
     } else if ((cause instanceof APIError || cause instanceof TakeAPIError) && cause.status !== 404 && cause.status !== 502) {
@@ -186,19 +198,3 @@ async function changeAuthentication(route: string, method: string, data?: unknow
 export function login(email: string, password: string) { return changeAuthentication('session', 'POST', { email, password }); }
 export function createAccount(email: string, password: string, invitation?: string) { return changeAuthentication('accounts', 'POST', { email, password, ...(invitation ? { invitation } : {}) }); }
 export function logout() { return changeAuthentication('session', 'DELETE'); }
-export async function addLocalLibrary() {
-  const account = user, scope = storageScope();
-  if (!account) throw new Error('Connectez-vous pour ajouter la bibliothèque locale.');
-  await synchronize();
-  if (user?.id !== account.id || storageScope() !== scope) throw new Error('Le compte a changé. Relancez l’import dans la bibliothèque souhaitée.');
-  const count = await importAnonymousLibrary(scope);
-  await synchronize();
-  return count;
-}
-export async function chooseConflict(kind: ResourceKind, id: string, keepLocal: boolean) {
-  if (!user) return;
-  const scope = storageScope();
-  await resolveSyncConflict(scope, kind, id, keepLocal);
-  await refreshCounts(scope);
-  await synchronize();
-}

@@ -38,3 +38,12 @@ export function takePitchCount(samples: PitchSample[], time: number) {
   while (lo < hi) { const mid = (lo + hi) >>> 1; if (samples[mid].captureTime <= time) lo = mid + 1; else hi = mid; }
   return lo;
 }
+
+/** Preserve the full passage; only a backwards score jump starts a fresh trace. */
+export function takeTraceStarts(samples: PitchSample[]): number[] {
+  let start = 0;
+  return samples.map((sample, index) => {
+    if (index && sample.scoreTime < samples[index - 1].scoreTime - 0.001) start = index;
+    return start;
+  });
+}

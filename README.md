@@ -14,7 +14,7 @@ Score rendering, audio synthesis and microphone analysis run on your device. The
 - **Interactive piano**: 88 keys, mouse, multitouch and computer-keyboard input. It shows the target voice, accompaniment, played keys and detected microphone pitch, including positions between keys.
 - Playback, tempo adjustment, note navigation, zoom and click-to-seek.
 - Repeated passages, per-part volume, mute/solo, instrument selection and audio transposition.
-- Live pitch traces, pitch deviation in cents and local practice recordings.
+- Full-passage pitch traces, pitch deviation in cents and local practice recordings.
 - Day, night and system themes, local imports, saved settings and export of the original MusicXML.
 
 ## Run locally
@@ -82,9 +82,9 @@ This is a bounded-latency adaptation for live use, not an identical implementati
 
 Imported scores, per-score settings and pending synchronization changes are stored in IndexedDB, separately for each account and the anonymous library. Device-specific preferences stay in localStorage. Clearing site data removes that browser's local library and recordings.
 
-Signing in automatically synchronizes takes, scores and practice settings. Existing anonymous takes move to the first account used on that device; they are not copied to other accounts. Moving the anonymous score library into an account requires an explicit action. Microphone selection, microphone timing adjustment and display preferences stay on the device. Transfers pause during recording and resume afterward.
+Signing in automatically synchronizes takes, scores and practice settings. Unassigned local scores, settings and takes move automatically into the signed-in account. Data already assigned to another account stays separate; no manual import or synchronization action is needed. Microphone selection, microphone timing adjustment and display preferences stay on the device. Transfers pause during recording and resume afterward.
 
-The synchronization service is a **separate private project**. The client uses a same-origin API under `api/v1/`, relative to its deployment path; take metadata is JSON and WAV audio is transferred as binary. Takes are limited to 64 MiB each and 512 MiB total per account (including metadata), with at most 1,000 active takes. An interrupted transfer is retried; it remains stored locally if the limit or network prevents synchronization. Server revisions detect conflicts; mutation IDs support retries; deletion markers prevent an older device from silently restoring deleted data. Both versions of a conflict are retained until the user chooses one.
+The synchronization service is a **separate private project**. The client uses a same-origin API under `api/v1/`, relative to its deployment path; take metadata is JSON and WAV audio is transferred as binary. Takes are limited to 64 MiB each and 512 MiB total per account (including metadata), with at most 1,000 active takes. An interrupted transfer is retried; it remains stored locally if the limit or network prevents synchronization. Server revisions detect conflicts; mutation IDs support retries; deletion markers prevent an older device from silently restoring deleted data. Pending local edits are retried automatically against the latest server revision; the concurrent version is backed up locally.
 
 Existing data from the app's previous name is migrated on the same origin without deleting the original copies or overwriting newer Chansonade records. Browser data belongs to an origin: moving to a different domain requires account synchronization or export/import.
 
