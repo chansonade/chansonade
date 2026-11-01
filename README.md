@@ -1,5 +1,7 @@
 # Chansonade
 
+[Code source sur GitHub](https://github.com/chansonade/chansonade) · [Signaler un problème](https://github.com/chansonade/chansonade/issues)
+
 Application de lecture de partitions, de chant et de piano, inspirée de Scorpus. POC web en français : les partitions, la synthèse audio et l’analyse du micro sont traitées dans le navigateur.
 
 ## Lancer
