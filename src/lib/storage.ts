@@ -162,14 +162,19 @@ async function migrateTakes(connection: IDBDatabase) {
   });
 }
 
-export async function saveTake(take: RecordedTake, scope = activeScope) {
+export async function saveTake(take: RecordedTake, scope = activeScope, folderId?: string | null) {
   const connection = await db();
-  await transaction(connection, ['takeData', 'takeIndex'], 'readwrite', async tx => {
+  await transaction(connection, ['takeData', 'takeIndex', 'resources', 'outbox'], 'readwrite', async tx => {
+    if (folderId != null) checkFolderId(folderId);
     const index = tx.objectStore('takeIndex');
     const old = await requestValue<TakeIndex | undefined>(index.get([scope, take.id]));
     if (old) throw new Error('Cet essai existe déjà.');
     tx.objectStore('takeData').put({ scope, id: take.id, take } satisfies TakeData);
     index.put(takeSummary(take, scope, scope !== ANONYMOUS_SCOPE));
+    if (folderId !== undefined) {
+      checkedItem('take', take.id);
+      await writeResourceInTransaction(tx, 'organization', `take.${take.id}`, { type: 'placement', itemKind: 'take', itemId: take.id, folderId }, scope);
+    }
   });
   changed(scope, 'write');
 }
@@ -193,12 +198,14 @@ export async function latestTake(scope = activeScope): Promise<RecordedTake | nu
 }
 export async function deleteTake(id: string, scope = activeScope) {
   const connection = await db();
-  await transaction(connection, ['takeData', 'takeIndex'], 'readwrite', async tx => {
+  await transaction(connection, ['takeData', 'takeIndex', 'resources', 'outbox'], 'readwrite', async tx => {
     const index = tx.objectStore('takeIndex');
     const record = await requestValue<TakeIndex | undefined>(index.get([scope, id]));
     if (!record || record.deleted) return;
     record.deleted = true; record.pending = scope !== ANONYMOUS_SCOPE; record.synced = false; record.change++;
     index.put(record); tx.objectStore('takeData').delete([scope, id]);
+    const placement = await requestValue<LocalResource | undefined>(tx.objectStore('resources').get(key(scope, 'organization', `take.${id}`)));
+    if (placement && !placement.deleted) await writeResourceInTransaction(tx, 'organization', `take.${id}`, null, scope);
   });
   changed(scope, 'write');
 }
@@ -208,8 +215,8 @@ export async function claimAnonymousTakes(scope: string) {
   if (scope === ANONYMOUS_SCOPE) return;
   const connection = await db();
   let moved = false;
-  await transaction(connection, ['takeData', 'takeIndex'], 'readwrite', async tx => {
-    const index = tx.objectStore('takeIndex'), data = tx.objectStore('takeData');
+  await transaction(connection, ['takeData', 'takeIndex', 'resources', 'outbox'], 'readwrite', async tx => {
+    const index = tx.objectStore('takeIndex'), data = tx.objectStore('takeData'), resources = tx.objectStore('resources');
     const records = await requestValue<TakeIndex[]>(index.index('scope').getAll(ANONYMOUS_SCOPE));
     for (const record of records) {
       if (record.deleted) continue;
@@ -220,6 +227,11 @@ export async function claimAnonymousTakes(scope: string) {
       const take = id === source.id ? source.take : { ...source.take, id };
       data.put({ scope, id, take } satisfies TakeData);
       index.put({ ...takeSummary(take, scope, true), change: record.change + 1 });
+      const placement = await requestValue<LocalResource | undefined>(resources.get(key(ANONYMOUS_SCOPE, 'organization', `take.${record.id}`)));
+      if (placement && !placement.deleted && placement.data && 'type' in placement.data && placement.data.type === 'placement') {
+        await writeResourceInTransaction(tx, 'organization', `take.${id}`, { ...placement.data, itemId: id }, scope);
+        resources.delete(key(ANONYMOUS_SCOPE, 'organization', `take.${record.id}`));
+      }
       data.delete([ANONYMOUS_SCOPE, record.id]); index.delete([ANONYMOUS_SCOPE, record.id]); moved = true;
     }
   });
@@ -261,8 +273,12 @@ export async function applyRemoteTake(scope: string, id: string, take: RecordedT
   if (didChange) changed(scope, 'remote');
 }
 
-export type ResourceKind = 'score' | 'settings';
-export type ResourceData = SavedScore | PracticeSettings;
+export type LibraryFolder = { id: string; name: string; added: number };
+export type OrganizationSnapshot = { folders: LibraryFolder[]; placements: Record<string, string | null> };
+export type FolderData = { type: 'folder'; name: string; added: number };
+export type PlacementData = { type: 'placement'; itemKind: 'score' | 'take'; itemId: string; folderId: string | null };
+export type ResourceKind = 'score' | 'settings' | 'organization';
+export type ResourceData = SavedScore | PracticeSettings | FolderData | PlacementData;
 export type RemoteResource = { kind: ResourceKind; id: string; data: ResourceData | null; revision: number; deleted: boolean };
 export type Mutation = { mutationId: string; kind: ResourceKind; id: string; baseRevision: number; data: ResourceData | null; deleted: boolean };
 export type PendingMutation = Mutation & { scope: string; change: number; sent: boolean };
@@ -341,21 +357,83 @@ export async function readSettings(id: string, scope = activeScope): Promise<Pra
   const record = await requestValue<LocalResource | undefined>(connection.transaction('resources').objectStore('resources').get(key(scope, 'settings', id)));
   return record && !record.deleted ? record.data as PracticeSettings : null;
 }
+async function writeResourceInTransaction(tx: IDBTransaction, kind: ResourceKind, id: string, data: ResourceData | null, scope: string) {
+  const resources = tx.objectStore('resources'), outbox = tx.objectStore('outbox');
+  const existing = await requestValue<LocalResource | undefined>(resources.get(key(scope, kind, id)));
+  if (existing && JSON.stringify(existing.data) === JSON.stringify(data) && existing.deleted === (data === null)) return;
+  const record = existing || localRecord(scope, kind, id, data);
+  record.data = data; record.deleted = data === null; record.change++; record.dirty = scope !== ANONYMOUS_SCOPE;
+  resources.put(record);
+  if (record.dirty && !record.conflict) {
+    const queued = await requestValue<PendingMutation | undefined>(outbox.get(key(scope, kind, id)));
+    if (!queued?.sent) outbox.put(queueFor(record));
+  }
+}
 async function writeResource(kind: ResourceKind, id: string, data: ResourceData | null, scope: string) {
   const connection = await db();
-  await transaction(connection, ['resources', 'outbox'], 'readwrite', async (tx) => {
-    const resources = tx.objectStore('resources'), outbox = tx.objectStore('outbox');
-    const existing = await requestValue<LocalResource | undefined>(resources.get(key(scope, kind, id)));
-    if (existing && JSON.stringify(existing.data) === JSON.stringify(data) && existing.deleted === (data === null)) return;
-    const record = existing || localRecord(scope, kind, id, data);
-    record.data = data; record.deleted = data === null; record.change++; record.dirty = scope !== ANONYMOUS_SCOPE;
-    resources.put(record);
-    if (record.dirty && !record.conflict) {
-      const queued = await requestValue<PendingMutation | undefined>(outbox.get(key(scope, kind, id)));
-      // Once sent, this request is immutable until acknowledgement. A newer
-      // edit stays in the resource and becomes the next mutation after ack.
-      if (!queued?.sent) outbox.put(queueFor(record));
+  await transaction(connection, ['resources', 'outbox'], 'readwrite', tx => writeResourceInTransaction(tx, kind, id, data, scope));
+  changed(scope, 'write');
+}
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function checkedFolderName(name: string): string {
+  const value = name.trim();
+  if (!value || value.length > 100) throw new Error('Le nom du dossier doit contenir entre 1 et 100 caractères.');
+  return value;
+}
+function checkFolderId(id: string) { if (!uuidPattern.test(id)) throw new Error('Identifiant de dossier invalide.'); }
+function checkedItem(kind: 'score' | 'take', id: string) {
+  if (kind === 'take' ? !uuidPattern.test(id) : !/^[A-Za-z0-9][A-Za-z0-9._-]{0,193}$/.test(id)) throw new Error('Identifiant invalide.');
+}
+export async function readOrganization(scope = activeScope): Promise<OrganizationSnapshot> {
+  const connection = await db();
+  const records = await requestValue<LocalResource[]>(connection.transaction('resources').objectStore('resources').index('scopeKind').getAll([scope, 'organization']));
+  const folders: LibraryFolder[] = [], placements: Record<string, string | null> = {};
+  for (const record of records) {
+    if (record.deleted || !record.data || !('type' in record.data)) continue;
+    const data = record.data;
+    if (data.type === 'folder' && record.id.startsWith('folder.')) folders.push({ id: record.id.slice(7), name: data.name, added: data.added });
+    else if (data.type === 'placement') placements[`${data.itemKind}:${data.itemId}`] = data.folderId;
+  }
+  folders.sort((a, b) => a.added - b.added || a.name.localeCompare(b.name));
+  return { folders, placements };
+}
+export function folderFor(snapshot: OrganizationSnapshot, kind: 'score' | 'take', id: string): string | null {
+  const folder = snapshot.placements[`${kind}:${id}`];
+  return folder && snapshot.folders.some(item => item.id === folder) ? folder : null;
+}
+export async function createFolder(name: string, scope = activeScope): Promise<string> {
+  const id = crypto.randomUUID();
+  await writeResource('organization', `folder.${id}`, { type: 'folder', name: checkedFolderName(name), added: Date.now() }, scope);
+  return id;
+}
+export async function renameFolder(id: string, name: string, scope = activeScope): Promise<void> {
+  checkFolderId(id); const value = checkedFolderName(name), connection = await db();
+  await transaction(connection, ['resources', 'outbox'], 'readwrite', async tx => {
+    const record = await requestValue<LocalResource | undefined>(tx.objectStore('resources').get(key(scope, 'organization', `folder.${id}`)));
+    if (!record || record.deleted || !record.data || !('type' in record.data) || record.data.type !== 'folder') throw new Error('Dossier introuvable.');
+    await writeResourceInTransaction(tx, 'organization', `folder.${id}`, { ...record.data, name: value }, scope);
+  });
+  changed(scope, 'write');
+}
+export async function deleteFolder(id: string, scope = activeScope): Promise<void> {
+  checkFolderId(id); const connection = await db();
+  await transaction(connection, ['resources', 'outbox'], 'readwrite', async tx => {
+    const records = await requestValue<LocalResource[]>(tx.objectStore('resources').index('scopeKind').getAll([scope, 'organization']));
+    await writeResourceInTransaction(tx, 'organization', `folder.${id}`, null, scope);
+    for (const record of records) if (!record.deleted && record.data && 'type' in record.data && record.data.type === 'placement' && record.data.folderId === id)
+      await writeResourceInTransaction(tx, 'organization', record.id, { ...record.data, folderId: null }, scope);
+  });
+  changed(scope, 'write');
+}
+export async function moveItem(kind: 'score' | 'take', id: string, folderId: string | null, scope = activeScope): Promise<void> {
+  checkedItem(kind, id); if (folderId !== null) checkFolderId(folderId);
+  const connection = await db();
+  await transaction(connection, ['resources', 'outbox'], 'readwrite', async tx => {
+    if (folderId !== null) {
+      const folder = await requestValue<LocalResource | undefined>(tx.objectStore('resources').get(key(scope, 'organization', `folder.${folderId}`)));
+      if (!folder || folder.deleted || !folder.data || !('type' in folder.data) || folder.data.type !== 'folder') throw new Error('Dossier introuvable.');
     }
+    await writeResourceInTransaction(tx, 'organization', `${kind}.${id}`, { type: 'placement', itemKind: kind, itemId: id, folderId }, scope);
   });
   changed(scope, 'write');
 }
@@ -470,6 +548,7 @@ export async function claimAnonymousLibrary(scope: string): Promise<number> {
     const resources = tx.objectStore('resources'), outbox = tx.objectStore('outbox');
     const local = await requestValue<LocalResource[]>(resources.index('scope').getAll(ANONYMOUS_SCOPE));
     for (const source of local) {
+      if (source.kind === 'organization' && source.id.startsWith('take.')) continue;
       resources.delete(key(ANONYMOUS_SCOPE, source.kind, source.id));
       if (source.deleted) continue;
       const recordKey = key(scope, source.kind, source.id);

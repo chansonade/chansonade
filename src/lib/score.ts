@@ -1,5 +1,6 @@
 import { unzipSync, strFromU8 } from 'fflate';
 import { alignNoteTimings } from './loop';
+import { publicCatalog } from './catalog';
 
 export type ViewMode = 'vertical' | 'horizontal';
 export type Part = {
@@ -52,7 +53,7 @@ function staffNotation(state: NotationState): StaffNotation {
 }
 
 export const examples = [
-  { file: 'une-souris-verte-chant-piano.musicxml', title: 'Une souris verte', subtitle: 'Chant & piano · exercice de justesse', composer: 'Traditionnel · arrangement Chansonade', period: '' },
+  ...publicCatalog,
   ...(import.meta.env.DEV && import.meta.env.VITE_LOCAL_SCORES === 'true' ? [
   { file: 'vecchia-zimarra-senti.mxl', title: 'Vecchia zimarra', subtitle: 'La Bohème · Colline', composer: 'Giacomo Puccini', period: '1896' },
   { file: 'ideale-francesco-paolo-tosti.mxl', title: 'Ideale', subtitle: 'Mélodie pour voix et piano', composer: 'Francesco Paolo Tosti', period: '1882' },

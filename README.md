@@ -15,6 +15,8 @@ Score rendering, audio synthesis and microphone analysis run on your device. The
 - Playback, tempo adjustment, note navigation, zoom and click-to-seek.
 - Repeated passages, per-part volume, mute/solo, instrument selection and audio transposition.
 - Full-passage pitch traces, pitch deviation in cents and local practice recordings.
+- A free public catalogue with beginner songs in French, English, German and Dutch, plus classical vocal pieces; each edition has source and license credits.
+- Personal folders shared by scores and takes, with search and automatic account synchronization. New takes inherit the score's current folder.
 - Day, night and system themes, local imports, saved settings and export of the original MusicXML.
 
 ## Run locally
@@ -55,6 +57,12 @@ The piano has its own instrument on the same AudioContext and can be played duri
 | L | Select a passage |
 | F | Full screen |
 | Escape | Cancel a selection, close panels or release piano keys |
+
+## Public catalogue and folders
+
+The **“Bibliothèque”** drawer separates **“Catalogue public”** from **“Mes partitions”**. Public pieces can be played without an account and added to the personal library without duplicates or restarting playback. Source and license information remains available for each edition. Shareable catalogue pages are generated under `catalogue/`; their practice links open the selected piece directly.
+
+Personal folders have one level. Create, rename and delete them from the folder controls, then use an item's folder selector to move it. Removing a folder keeps its scores and takes under **“Non classés”**. Folders and placements synchronize automatically when signed in. Public catalogue folders are maintained by the project; personal scores and recordings are private.
 
 ## Record a take
 
@@ -134,6 +142,6 @@ Current limitations include:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [the module map](docs/ARCHITECTURE.md) and [publication instructions](docs/PUBLISHING.md). These additional documents are currently in French.
 
-The original client code is licensed under **GPL-3.0-only**, copyright © 2026 Chansonade contributors. Libraries and assets retain their own licenses. The bundled TimGM6mb SoundFont is GPL version 2; the sample arrangement is CC BY-SA 4.0. The Chansonade and GitHub logos have separate terms and are not covered by the client's GPL. See [LICENSE](LICENSE) and [THIRD_PARTY.md](THIRD_PARTY.md).
+The original client code is licensed under **GPL-3.0-only**, copyright © 2026 Chansonade contributors. Libraries and assets retain their own licenses. The bundled TimGM6mb SoundFont is GPL version 2; public scores have their own licenses, including CC0 and CC BY-SA 4.0. The Chansonade and GitHub logos have separate terms and are not covered by the client's GPL. See [LICENSE](LICENSE), [THIRD_PARTY.md](THIRD_PARTY.md) and [public catalogue credits](docs/PUBLIC_CATALOG.md).
 
 The public repository was created from a clean export. The original private working history and local score corpus are not part of it. To prepare a new public snapshot from a private working tree, use `scripts/export-public.mjs` as described in the publication instructions.

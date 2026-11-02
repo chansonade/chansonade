@@ -151,7 +151,8 @@ try {
   const notices = `Chansonade — third-party notices\n\nThe client source is GPL-3.0-only. Each component and asset retains its own license.\nThe full versioned source offer is ../source/chansonade-source.tar.gz.\n\n${await readFile(path.join(root, 'THIRD_PARTY.md'), 'utf8')}\n\n===== librosa adaptation notice =====\n${(await readFile(path.join(root, 'src/lib/pitch-detector.ts'), 'utf8')).split('*/', 1)[0]}*/\n${npmRecords.map((record) => record.notices).join('')}${upstreamRecords.map((record) => record.notices).join('')}${assetNotices.join('')}`;
   await writeFile(path.join(dist, 'legal/NOTICES.txt'), notices);
   await cp(path.join(root, 'LICENSE'), path.join(dist, 'legal/LICENSE.txt'));
-  await writeFile(path.join(dist, 'legal/THIRD_PARTY.md'), (await readFile(path.join(root, 'THIRD_PARTY.md'), 'utf8')).replace('(docs/SOURCES.md)', '(SOURCES.md)'));
+  await writeFile(path.join(dist, 'legal/THIRD_PARTY.md'), (await readFile(path.join(root, 'THIRD_PARTY.md'), 'utf8')).replace('(docs/SOURCES.md)', '(SOURCES.md)').replace('(docs/PUBLIC_CATALOG.md)', '(PUBLIC_CATALOG.md)'));
+  await cp(path.join(root, 'docs/PUBLIC_CATALOG.md'), path.join(dist, 'legal/PUBLIC_CATALOG.md'));
   await cp(path.join(root, 'docs/SOURCES.md'), path.join(dist, 'legal/SOURCES.md'));
   await writeFile(path.join(dist, 'legal/PUBLISHING.md'), (await readFile(path.join(root, 'docs/PUBLISHING.md'), 'utf8')).replaceAll('(../THIRD_PARTY.md)', '(THIRD_PARTY.md)'));
   await writeFile(path.join(snapshot, 'THIRD-PARTY-NOTICES.txt'), notices);

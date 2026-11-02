@@ -47,6 +47,12 @@ La licence de la banque de sons est distincte de celles du moteur de synthèse e
 
 ## Partitions de démonstration
 
+Le catalogue public et les licences propres à chaque édition figurent dans
+`public/scores/catalog.json` et [PUBLIC_CATALOG.md](docs/PUBLIC_CATALOG.md).
+Les nouveaux arrangements de comptines de Chansonade et les éditions OpenScore
+retenues sont distribués sous CC0. L'édition « Une souris verte » conserve
+explicitement sa licence CC BY-SA 4.0 décrite ci-dessous.
+
 Les six anciens fichiers MXL de travail proviennent du dossier `examples/` du
 projet Scorpus voisin. Ils contiennent des œuvres de Puccini, Tosti, Mozart et
 Bellini, avec des mentions de droits et de provenance hétérogènes qui ne

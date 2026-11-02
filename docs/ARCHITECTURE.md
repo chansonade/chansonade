@@ -19,6 +19,8 @@ micro. Le serveur de comptes et de synchronisation est facultatif et indépendan
 | `lib/timeline.ts`, `lib/projection.ts` | Correspondance entre horloge de capture et transport, puis projection de la hauteur mesurée sur les portées. |
 | `lib/storage.ts`, `lib/sync.ts`, `lib/take-sync.ts` | Persistance locale, file de mutations et synchronisation automatique par compte. `AccountPanel.svelte` présente la connexion et son état. |
 | `lib/theme.ts`, `lib/ThemeToggle.svelte` | Préférence système/clair/sombre et application de `data-theme` au document. |
+| `lib/catalog.ts`, `public/scores/catalog.json` | Catalogue public éditorialisé, identités de contenu, dossiers par répertoire/langue et provenance par édition. |
+| `lib/FolderControls.svelte`, `lib/ItemFolder.svelte` | Dossiers personnels à un niveau, classement commun aux partitions et essais, sans modifier les fichiers. |
 
 Les styles communs sont dans `style.css`, les styles propres aux composants dans
 leurs fichiers Svelte. Les ressources servies telles quelles sont dans `public/`.
@@ -84,6 +86,18 @@ Le serveur privé `chansonade-server` possède son propre projet ; il ne fait pa
 public client ni de l'archive source.
 
 ## Build, hors ligne et licences
+
+Les dossiers sont des ressources `organization` : une entrée par dossier et par
+placement (`score:<id>` / `take:<id>` côté interface). Ils utilisent la même file
+transactionnelle et la même synchronisation que les réglages. Les WAV restent
+immuables ; déplacer un essai ne les retransfère pas. Les dossiers publics sont
+un catalogue en lecture seule, distinct des données privées. Les ajouts publics
+emploient le SHA-256 du XML, identique aux imports privés, sans relancer le lecteur.
+
+`scripts/build-catalog-pages.mjs` génère les pages publiques sans JavaScript sous
+`catalogue/`. Leurs liens `?score=<id>` ouvrent directement l'édition dans le client.
+La configuration nginx autorise l'indexation de ces pages publiques et conserve
+les restrictions du client et de l'API ; elle ne publie aucun dossier personnel.
 
 `CHANSONADE_BASE_PATH` définit la base Vite pour les assets, Workers, téléchargements
 et l'API. `scripts/build-source.mjs` prépare le snapshot source et les notices
