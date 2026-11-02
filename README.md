@@ -2,14 +2,14 @@
 
 [Try the app](https://nafis.io/projects/chansonade/) · [Source code](https://github.com/chansonade/chansonade) · [Report an issue](https://github.com/chansonade/chansonade/issues)
 
-A browser-based score reader and practice tool for singers and pianists. Chansonade combines MusicXML playback, an interactive piano and microphone pitch tracking. It is an early proof of concept; the interface is currently in French.
+A browser-based score reader and practice tool for singers and pianists. Chansonade combines MusicXML playback, an interactive piano and microphone pitch tracking. It is an early proof of concept; the interface supports French, English, German and Dutch.
 
 Score rendering, audio synthesis and microphone analysis run on your device. The reader works without an account. An optional, separately hosted service synchronizes scores, practice settings and recorded takes.
 
 ## Features
 
-- **Score view — “Partition”**: vertical notation with automatic tracking of the current system.
-- **Ribbon view — “Ruban”**: a continuous horizontal score with smooth movement between bar markers, independent of note highlighting.
+- **Score view — “Score”**: vertical notation with automatic tracking of the current system.
+- **Ribbon view — “Ribbon”**: a continuous horizontal score with smooth movement between bar markers, independent of note highlighting.
 - **Mobile Auto mode**: vertical notation in portrait and an immersive ribbon in landscape. A manual choice overrides orientation.
 - **Interactive piano**: 88 keys, mouse, multitouch and computer-keyboard input. It shows the target voice, accompaniment, played keys and detected microphone pitch, including positions between keys.
 - Playback, tempo adjustment, note navigation, zoom and click-to-seek.
@@ -18,6 +18,7 @@ Score rendering, audio synthesis and microphone analysis run on your device. The
 - A free public catalogue with beginner songs in French, English, German and Dutch, plus classical vocal pieces; each edition has source and license credits.
 - Personal folders shared by scores and takes, with search and automatic account synchronization. New takes inherit the score's current folder.
 - Day, night and system themes, local imports, saved settings and export of the original MusicXML.
+- A language menu with an automatic browser-language default and a choice remembered on the device.
 
 ## Run locally
 
@@ -34,19 +35,31 @@ Import a `.musicxml`, `.xml` or `.mxl` file, or use the included **Une souris ve
 
 ### A simple singing exercise
 
-**Une souris verte** contains the first verse, 17 bars, in G major at 78 BPM. Its “Chant” part is separate from the piano: mute that part in **“Voix & instruments”** to sing with piano accompaniment alone.
+**Une souris verte** contains the first verse, 17 bars, in G major at 78 BPM. Its “Chant” part is separate from the piano: mute that part in **“Voice & instruments”** to sing with piano accompaniment alone.
 
 The melody ranges from D4 to D5. Set the voice part to **−12 semitones** to practice an octave lower. Transposition changes playback and the expected pitch, while the written notation stays unchanged.
 
 The arrangement uses a [transcription of the traditional melody](https://fr.wikipedia.org/wiki/Une_souris_verte_(chanson)) with a simple original piano accompaniment. Attribution and CC BY-SA 4.0 licensing are included in the MusicXML and [third-party credits](THIRD_PARTY.md).
 
+## Interface language
+
+Use the globe in the header to choose **Français, English, Deutsch or Nederlands**.
+The first visit uses a supported browser language, falling back to English. A
+manual choice is remembered on the device and shared between its open tabs. It
+does not depend on an account. Switching language preserves playback and microphone
+capture. Piece titles, lyrics, part names and personal folder names keep their
+original text; note names and recording dates follow the interface language.
+
+The title area also contains the view mode, bar count, edition source/license
+and the action to add a public score to your library.
+
 ## Practice controls
 
-Use **“Passage”** to choose the first and last notes of a passage. Its switch enables or disables repetition. **“Voix & instruments”** selects the target voice and controls each part's volume, mute/solo, instrument and transposition.
+Use **“Loop”** to choose the first and last notes of a passage. Its switch enables or disables repetition. **“Voice & instruments”** selects the target voice and controls each part's volume, mute/solo, instrument and transposition.
 
-**“Écouter ma voix”** starts microphone pitch tracking. Headphones help isolate your voice from the accompaniment. The measured pitch is displayed as a note, a deviation in cents and a trace over the score. Expected score notes are never used to correct the detected pitch.
+**“Listen to my voice”** starts microphone pitch tracking. Headphones help isolate your voice from the accompaniment. The measured pitch is displayed as a note, a deviation in cents and a trace over the score. Expected score notes are never used to correct the detected pitch.
 
-In Piano view, click the keyboard to focus it, then use the indicated computer keys. AZERTY and QWERTY layouts use the same physical key positions; the computer-keyboard register can be moved by octaves. Hold several keys for chords or slide between keys. The arrows and recenter buttons navigate the 88-key range. **“Clavier”** opens a compact keyboard below the score on larger screens.
+In Piano view, click the keyboard to focus it, then use the indicated computer keys. AZERTY and QWERTY layouts use the same physical key positions; the computer-keyboard register can be moved by octaves. Hold several keys for chords or slide between keys. The arrows and recenter buttons navigate the 88-key range. **“Keyboard”** opens a compact keyboard below the score on larger screens.
 
 The piano has its own instrument on the same AudioContext and can be played during accompaniment playback. Per-part volume, mute, instrument and transposition settings do not alter manually played keys. Microphone analysis tracks one pitch at a time; it does not recognize chords.
 
@@ -60,23 +73,23 @@ The piano has its own instrument on the same AudioContext and can be played duri
 
 ## Public catalogue and folders
 
-The **“Bibliothèque”** drawer separates **“Catalogue public”** from **“Mes partitions”**. Public pieces can be played without an account and added to the personal library without duplicates or restarting playback. Source and license information remains available for each edition. Shareable catalogue pages are generated under `catalogue/`; their practice links open the selected piece directly.
+The **“Library”** drawer separates **“Public catalogue”** from **“My scores”**. Public pieces can be played without an account and added to the personal library without duplicates or restarting playback. Source and license information remains available for each edition. Shareable catalogue pages are generated under `catalogue/`; their practice links open the selected piece directly.
 
-Personal folders have one level. Create, rename and delete them from the folder controls, then use an item's folder selector to move it. Removing a folder keeps its scores and takes under **“Non classés”**. Folders and placements synchronize automatically when signed in. Public catalogue folders are maintained by the project; personal scores and recordings are private.
+Personal folders have one level. Create, rename and delete them from the folder controls, then use an item's folder selector to move it. Removing a folder keeps its scores and takes under **“Unfiled”**. Folders and placements synchronize automatically when signed in. Public catalogue folders are maintained by the project; personal scores and recordings are private.
 
 ## Record a take
 
-Select **“Enregistrer un essai”**. The microphone starts, a three-second count-in prepares the entrance, then playback begins at the selected position. Score following is enabled automatically.
+Select **“Record a take”**. The microphone starts, a three-second count-in prepares the entrance, then playback begins at the selected position. Score following is enabled automatically.
 
-Select **“Arrêter l’essai”** to stop, including from the floating landscape control. Reaching the end of the score also stops recording. Wait for saving to finish before reloading or closing the page.
+Select **“Stop take”** to stop, including from the floating landscape control. Reaching the end of the score also stops recording. Wait for saving to finish before reloading or closing the page.
 
-Takes are saved on the device in IndexedDB. They contain an uncompressed mono WAV, confirmed pitch observations, the score, practice settings and transport timing. The count-in is included in the audio. Open **“Essais”** (recordings) to browse, replay, export or delete them, separately from the voice and instrument settings. Replay follows the recorded WAV clock and redraws the saved pitch curve, including pauses and loop jumps. When signed in, takes are also synchronized automatically to the account and can be retrieved on another device.
+Takes are saved on the device in IndexedDB. They contain an uncompressed mono WAV, confirmed pitch observations, the score, practice settings and transport timing. The count-in is included in the audio. Open **“Takes”** (recordings) to browse, replay, export or delete them, separately from the voice and instrument settings. Replay follows the recorded WAV clock and redraws the saved pitch curve, including pauses and loop jumps. When signed in, takes are also synchronized automatically to the account and can be retrieved on another device.
 
-- **“Réécouter”** opens the selected take on its saved score.
+- **“Listen again”** opens the selected take on its saved score.
 - The export button downloads a ZIP containing `voice.wav`, `analysis.json` and `score.musicxml`.
 - Deleting a take propagates the deletion to your other signed-in devices.
 
-Under **“Voix & instruments → Retour de voix”**, choose the microphone input. Browser-requested audio processing is disabled, but system-level noise cancellation can still affect the signal. The input name and settings are kept in local take metadata and exports. Synchronization omits the device name and hardware identifiers, but sends the recording and its analysis to the account service.
+Under **“Voice & instruments → Voice feedback”**, choose the microphone input. Browser-requested audio processing is disabled, but system-level noise cancellation can still affect the signal. The input name and settings are kept in local take metadata and exports. Synchronization omits the device name and hardware identifiers, but sends the recording and its analysis to the account service.
 
 ### How pitch tracking works
 

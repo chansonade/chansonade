@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t, translate, locale, formatDate } from './i18n';
   import { onMount } from 'svelte';
   import { X, Play, Download, Trash2, Cloud, HardDrive, LoaderCircle, AudioLines } from '@lucide/svelte';
   import { listTakes, getTake, deleteTake, storageScope, subscribeStorage, type RecordedTake, type TakeSummary } from './storage';
@@ -37,30 +38,30 @@
         if (!take) throw new Error('Cet essai n’est plus disponible.');
         if (kind === 'play') { await onplay(take); onclose(); } else onexport(take);
       }
-    } catch (cause) { failure = cause instanceof Error ? cause.message : 'Impossible d’ouvrir cet essai.'; onerror(failure); }
+    } catch (cause) { failure = cause instanceof Error ? cause.message : 'Impossible d’ouvrir cet essai.'; onerror(translate(failure)); }
     finally { busy = ''; }
   }
   onMount(() => { void refresh(); const stop = subscribeStorage(event => { if (event.reason === 'scope') { takes = []; organization = {folders:[],placements:{}}; selectedFolder = 'all'; search = ''; armedDelete = ''; failure = ''; } void refresh(); }); return () => { revision++; stop(); }; });
 </script>
 
-<button class="drawer-backdrop" aria-label="Fermer les enregistrements" onclick={onclose}></button>
-<aside class="take-panel" aria-label="Enregistrements">
-  <div class="panel-heading"><AudioLines size={20} /><h2>Enregistrements</h2><button class="icon-button" aria-label="Fermer les enregistrements" onclick={onclose}><X size={20} /></button></div>
-  <p class="explanation">Réécoutez un essai avec sa partition et sa courbe de hauteur.</p>
-  <p class="sync-note">{#if $syncState.user}<Cloud size={15} /> Synchronisation automatique avec votre compte.{:else}<HardDrive size={15} /> Conservés sur cet appareil. Connectez-vous pour les synchroniser.{/if}</p>
-  {#if $syncState.user && $syncState.message}<p class="failure" role="status">{$syncState.message}</p>{/if}
-  {#if failure}<p class="failure" role="alert">{failure}</p>{/if}
-  <input class="take-search" type="search" aria-label="Rechercher un essai" placeholder="Rechercher un essai" bind:value={search} />
+<button class="drawer-backdrop" aria-label={$t("Fermer les enregistrements")} onclick={onclose}></button>
+<aside class="take-panel" aria-label={$t("Enregistrements")}>
+  <div class="panel-heading"><AudioLines size={20} /><h2>{$t("Enregistrements")}</h2><button class="icon-button" aria-label={$t("Fermer les enregistrements")} onclick={onclose}><X size={20} /></button></div>
+  <p class="explanation">{$t("Réécoutez un essai avec sa partition et sa courbe de hauteur.")}</p>
+  <p class="sync-note">{#if $syncState.user}<Cloud size={15} /> {$t('Synchronisation automatique avec votre compte.')}{:else}<HardDrive size={15} /> {$t('Conservés sur cet appareil. Connectez-vous pour les synchroniser.')}{/if}</p>
+  {#if $syncState.user && $syncState.message}<p class="failure" role="status">{$t($syncState.message)}</p>{/if}
+  {#if failure}<p class="failure" role="alert">{$t(failure)}</p>{/if}
+  <input class="take-search" type="search" aria-label={$t("Rechercher un essai")} placeholder={$t("Rechercher un essai")} bind:value={search} />
   <FolderControls {organization} bind:selected={selectedFolder} onrefresh={refresh} {onerror} {blocked} />
-  {#if !visibleTakes.length}<p class="empty">Aucun essai enregistré. Utilisez « Enregistrer » pour commencer.</p>{/if}
-  {#if visibleTakes.length && !filteredTakes.length}<p class="empty">Aucun essai dans cette sélection.</p>{/if}
+  {#if !visibleTakes.length}<p class="empty">{$t("Aucun essai enregistré. Utilisez « Enregistrer » pour commencer.")}</p>{/if}
+  {#if visibleTakes.length && !filteredTakes.length}<p class="empty">{$t("Aucun essai dans cette sélection.")}</p>{/if}
   <div class="take-list">{#each filteredTakes as take (take.id)}
     <article class="take-card">
       <h3>{take.title}</h3>
-      <p><time datetime={new Date(take.createdAt).toISOString()}>{new Date(take.createdAt).toLocaleString('fr-FR', {dateStyle:'medium',timeStyle:'short'})}</time><span>{duration(take.duration)}</span></p>
+      <p><time datetime={new Date(take.createdAt).toISOString()}>{formatDate(take.createdAt, $locale)}</time><span>{duration(take.duration)}</span></p>
       <ItemFolder {organization} kind="take" id={take.id} title={take.title} {onerror} blocked={blocked || memoryTakes.some(item => item.id === take.id)} />
-      {#if memoryTakes.some(item => item.id === take.id)}<p class="failure">En mémoire seulement : exportez cet essai avant de fermer la page.</p>{/if}
-      <div class="take-controls"><button class="review-play" disabled={!!busy || blocked} onclick={() => void action(take.id, 'play')}>{#if busy === take.id}<LoaderCircle class="spin" size={16} />{:else}<Play size={16} />{/if}Réécouter</button><span class="take-sync" title={take.synced ? 'Synchronisé avec votre compte' : take.pending ? 'En attente de synchronisation' : 'Sur cet appareil'}>{#if take.synced}<Cloud size={15} />{:else}<HardDrive size={15} />{/if}</span><button class="icon-button" disabled={!!busy || blocked} aria-label="Exporter cet essai" onclick={() => void action(take.id, 'export')}><Download size={17} /></button><button class="delete-button" class:armed={armedDelete === take.id} disabled={!!busy || blocked} aria-label={armedDelete === take.id ? 'Confirmer la suppression' : 'Supprimer cet essai'} onclick={() => void action(take.id, 'delete')}><Trash2 size={17} />{#if armedDelete === take.id}<span>Confirmer</span>{/if}</button></div>
+      {#if memoryTakes.some(item => item.id === take.id)}<p class="failure">{$t("En mémoire seulement : exportez cet essai avant de fermer la page.")}</p>{/if}
+      <div class="take-controls"><button class="review-play" disabled={!!busy || blocked} onclick={() => void action(take.id, 'play')}>{#if busy === take.id}<LoaderCircle class="spin" size={16} />{:else}<Play size={16} />{/if}{$t('Réécouter')}</button><span class="take-sync" title={take.synced ? $t('Synchronisé avec votre compte') : take.pending ? $t('En attente de synchronisation') : $t('Sur cet appareil')}>{#if take.synced}<Cloud size={15} />{:else}<HardDrive size={15} />{/if}</span><button class="icon-button" disabled={!!busy || blocked} aria-label={$t("Exporter cet essai")} onclick={() => void action(take.id, 'export')}><Download size={17} /></button><button class="delete-button" class:armed={armedDelete === take.id} disabled={!!busy || blocked} aria-label={armedDelete === take.id ? $t('Confirmer la suppression') : $t('Supprimer cet essai')} onclick={() => void action(take.id, 'delete')}><Trash2 size={17} />{#if armedDelete === take.id}<span>{$t("Confirmer")}</span>{/if}</button></div>
     </article>
   {/each}</div>
 </aside>

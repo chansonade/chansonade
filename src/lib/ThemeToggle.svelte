@@ -1,16 +1,17 @@
 <script lang="ts">
+  import { t } from './i18n';
   import { Sun, Moon, Monitor } from '@lucide/svelte';
   import { themePreference, cycleTheme } from './theme';
   let { compact = false }: { compact?: boolean } = $props();
 
   const labels = { system: 'Système', light: 'Jour', dark: 'Nuit' };
-  const next = { system: 'jour', light: 'nuit', dark: 'système' };
-  const description = $derived(`Thème : ${labels[$themePreference]}. Passer au mode ${next[$themePreference]}`);
+  const next = { system: 'light', light: 'dark', dark: 'system' } as const;
+  const description = $derived($t('Thème : {current}. Passer au mode {next}', { current: $t(labels[$themePreference]), next: $t(labels[next[$themePreference]]) }));
 </script>
 
 <button class="theme-toggle" class:compact type="button" title={description} aria-label={description} onclick={cycleTheme}>
   {#if $themePreference === 'dark'}<Moon size={17} />{:else if $themePreference === 'light'}<Sun size={17} />{:else}<Monitor size={17} />{/if}
-  <span>{labels[$themePreference]}</span>
+  <span>{$t(labels[$themePreference])}</span>
 </button>
 
 <style>

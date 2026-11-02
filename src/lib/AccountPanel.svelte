@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from './i18n';
   import { onMount, untrack } from 'svelte';
   import { X, LogOut, UserRound, LoaderCircle } from '@lucide/svelte';
   import { syncState, login, createAccount, logout } from './sync';
@@ -48,29 +49,29 @@
 
 <div class="account-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) onclose(); }}>
   <div class="account-dialog" role="dialog" aria-modal="true" aria-labelledby="account-title" tabindex="-1" bind:this={dialog} onkeydown={keyboard}>
-    <button class="close icon-button" aria-label="Fermer le compte" onclick={onclose}><X size={20} /></button>
-    <h2 id="account-title"><UserRound size={23} /> Compte</h2>
-    {#if blocked}<p class="warning">Terminez l’enregistrement avant de changer de compte ou de bibliothèque.</p>{/if}
+    <button class="close icon-button" aria-label={$t("Fermer le compte")} onclick={onclose}><X size={20} /></button>
+    <h2 id="account-title"><UserRound size={23} /> {$t('Compte')}</h2>
+    {#if blocked}<p class="warning">{$t("Terminez l’enregistrement avant de changer de compte ou de bibliothèque.")}</p>{/if}
     {#if $syncState.user}
       <p class="account-email">{$syncState.user.email}</p>
-      <div class="sync-status" role="status">{#if $syncState.busy}<LoaderCircle class="spin" size={15} />{/if}<span>{$syncState.status}{#if $syncState.pending} · {$syncState.pending} modification{$syncState.pending > 1 ? 's' : ''}{/if}</span></div>
-      <p>Partitions, réglages et enregistrements se synchronisent automatiquement avec votre compte.</p>
-      {#if $syncState.message}<p class="warning">{$syncState.message}</p>{/if}
-      <button class="logout secondary" disabled={working || blocked} onclick={() => void perform(logout, true)}><LogOut size={15} /> Se déconnecter</button>
+      <div class="sync-status" role="status">{#if $syncState.busy}<LoaderCircle class="spin" size={15} />{/if}<span>{$t($syncState.status)}{#if $syncState.pending} · {$t($syncState.pending > 1 ? "{count} modifications" : "{count} modification", { count: $syncState.pending })}{/if}</span></div>
+      <p>{$t("Partitions, réglages et enregistrements se synchronisent automatiquement avec votre compte.")}</p>
+      {#if $syncState.message}<p class="warning">{$t($syncState.message)}</p>{/if}
+      <button class="logout secondary" disabled={working || blocked} onclick={() => void perform(logout, true)}><LogOut size={15} /> {$t('Se déconnecter')}</button>
     {:else}
-      <div class="tabs" aria-label="Connexion ou création de compte"><button class:active={mode === 'login'} onclick={() => { mode = 'login'; error = ''; }}>Connexion</button><button class:active={mode === 'register'} onclick={() => { mode = 'register'; error = ''; }}>Créer un compte</button></div>
-      <p>La connexion permet de retrouver les partitions, réglages et enregistrements sur vos autres appareils. Le lecteur fonctionne aussi sans compte.</p>
+      <div class="tabs" aria-label={$t("Connexion ou création de compte")}><button class:active={mode === 'login'} onclick={() => { mode = 'login'; error = ''; }}>{$t("Connexion")}</button><button class:active={mode === 'register'} onclick={() => { mode = 'register'; error = ''; }}>{$t("Créer un compte")}</button></div>
+      <p>{$t("La connexion permet de retrouver les partitions, réglages et enregistrements sur vos autres appareils. Le lecteur fonctionne aussi sans compte.")}</p>
       <form onsubmit={submit}>
-        <label for="account-email">Adresse e-mail</label><input id="account-email" name="email" type="email" autocomplete="email" bind:value={email} required maxlength="254" disabled={working || blocked} />
-        <label for="account-password">Mot de passe</label><input id="account-password" name="password" type="password" autocomplete={mode === 'login' ? 'current-password' : 'new-password'} bind:value={password} required minlength={mode === 'register' ? 12 : 1} maxlength="256" disabled={working || blocked} />
+        <label for="account-email">{$t("Adresse e-mail")}</label><input id="account-email" name="email" type="email" autocomplete="email" bind:value={email} required maxlength="254" disabled={working || blocked} />
+        <label for="account-password">{$t("Mot de passe")}</label><input id="account-password" name="password" type="password" autocomplete={mode === 'login' ? 'current-password' : 'new-password'} bind:value={password} required minlength={mode === 'register' ? 12 : 1} maxlength="256" disabled={working || blocked} />
         {#if mode === 'register'}
-          <small>Au moins 12 caractères.</small>
-          {#if $syncState.registration === 'invite'}<label for="account-invitation">Code d’invitation</label><input id="account-invitation" name="invitation" type="text" autocomplete="off" bind:value={invitation} required maxlength="256" disabled={working || blocked} /><small>Les comptes sont actuellement ouverts sur invitation.</small>{/if}
+          <small>{$t("Au moins 12 caractères.")}</small>
+          {#if $syncState.registration === 'invite'}<label for="account-invitation">{$t("Code d’invitation")}</label><input id="account-invitation" name="invitation" type="text" autocomplete="off" bind:value={invitation} required maxlength="256" disabled={working || blocked} /><small>{$t("Les comptes sont actuellement ouverts sur invitation.")}</small>{/if}
         {/if}
-        <button class="primary-button" type="submit" disabled={working || blocked}>{#if working}<LoaderCircle class="spin" size={16} />{/if}{mode === 'login' ? 'Se connecter' : 'Créer le compte'}</button>
+        <button class="primary-button" type="submit" disabled={working || blocked}>{#if working}<LoaderCircle class="spin" size={16} />{/if}{mode === 'login' ? $t('Se connecter') : $t('Créer le compte')}</button>
       </form>
     {/if}
-    {#if error}<p class="warning" role="alert">{error}</p>{/if}
+    {#if error}<p class="warning" role="alert">{$t(error)}</p>{/if}
   </div>
 </div>
 

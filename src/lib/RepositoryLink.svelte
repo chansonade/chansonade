@@ -1,9 +1,10 @@
 <script lang="ts">
+  import { t } from './i18n';
   import { Code2 } from '@lucide/svelte';
   let { compact = false }: { compact?: boolean } = $props();
   const repository = import.meta.env.VITE_REPOSITORY_URL || '';
   const href = repository || `${import.meta.env.BASE_URL}source/chansonade-source.tar.gz`;
-  const label = repository ? 'Code source sur GitHub' : 'Télécharger le code source';
+  const label = $derived(repository ? $t('Code source sur GitHub') : $t('Télécharger le code source'));
 </script>
 
 <a class="repository-link" class:compact {href} target={repository ? '_blank' : undefined} rel={repository ? 'noopener noreferrer' : undefined} aria-label={label} title={label}>
@@ -11,7 +12,7 @@
     <img class="day" src="{import.meta.env.BASE_URL}brands/github-black.svg" alt="" width="19" height="19" />
     <img class="night" src="{import.meta.env.BASE_URL}brands/github-white.svg" alt="" width="19" height="19" />
   {:else}<Code2 size={19} />{/if}
-  <span>{repository ? 'GitHub' : 'Sources'}</span>
+  <span>{repository ? 'GitHub' : $t('Sources')}</span>
 </a>
 
 <style>

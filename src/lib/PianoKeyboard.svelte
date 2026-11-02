@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t, locale, noteName } from './i18n';
   import { onMount } from 'svelte';
   import { ChevronLeft, ChevronRight, Crosshair, Keyboard, Mic, Minus, Plus, Music2 } from '@lucide/svelte';
 
@@ -16,7 +17,6 @@
   const whites = notes.filter((midi) => !black(midi));
   const blacks = notes.filter(black);
   const whiteIndex = new Map(whites.map((midi, index) => [midi, index]));
-  const names = ['Do', 'Do♯', 'Ré', 'Ré♯', 'Mi', 'Fa', 'Fa♯', 'Sol', 'Sol♯', 'La', 'La♯', 'Si'];
   const pcCodes = ['KeyA', 'KeyW', 'KeyS', 'KeyE', 'KeyD', 'KeyF', 'KeyT', 'KeyG', 'KeyY', 'KeyH', 'KeyU', 'KeyJ', 'KeyK', 'KeyO', 'KeyL', 'KeyP', 'Semicolon'];
   const pcLabels = {
     azerty: ['Q', 'Z', 'S', 'E', 'D', 'F', 'T', 'G', 'Y', 'H', 'U', 'J', 'K', 'O', 'L', 'P', 'M'],
@@ -28,7 +28,8 @@
   let layout = $state<'azerty' | 'qwerty'>('azerty');
   let pcBase = $state(48);
   let pressedNotes = $state<number[]>([]);
-  let viewRange = $state('Do2 – Do5');
+  let visibleRange = $state<[number, number]>([36, 72]);
+  const viewRange = $derived(`${noteName(visibleRange[0], $locale)} – ${noteName(visibleRange[1], $locale)}`);
   let canPanLeft = $state(true);
   let canPanRight = $state(true);
   let previousViewportWidth = 0;
@@ -48,7 +49,7 @@
   const frequency = $derived(validPitch === null ? null : 440 * 2 ** ((validPitch - 69) / 12));
   const marker = $derived(validPitch !== null && validPitch >= 21 && validPitch <= 108 ? pitchPosition(validPitch) : null);
 
-  function label(midi: number) { return `${names[((midi % 12) + 12) % 12]}${Math.floor(midi / 12) - 1}`; }
+  function label(midi: number) { return noteName(midi, $locale); }
   function keyPosition(midi: number) {
     return black(midi) ? whites.filter((white) => white < midi).length : (whiteIndex.get(midi) ?? 0) + 0.5;
   }
@@ -133,7 +134,7 @@
     const width = keybed.scrollWidth / whites.length;
     const first = Math.max(0, Math.floor(scrollArea.scrollLeft / width));
     const last = Math.min(whites.length - 1, Math.ceil((scrollArea.scrollLeft + scrollArea.clientWidth) / width) - 1);
-    viewRange = `${label(whites[first])} – ${label(whites[last])}`;
+    visibleRange = [whites[first], whites[last]];
     canPanLeft = scrollArea.scrollLeft > 1;
     canPanRight = scrollArea.scrollLeft + scrollArea.clientWidth < scrollArea.scrollWidth - 1;
   }
@@ -177,32 +178,32 @@
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (A musical keyboard is a custom application widget with local PC-key handling.) -->
-<section class="piano-keyboard" class:compact role="application" aria-label="Clavier de piano : cliquez ici pour jouer au clavier de l’ordinateur" tabindex="0" bind:this={root} onkeydown={onKeyDown} onkeyup={onKeyUp} onfocusout={focusOut}>
+<section class="piano-keyboard" class:compact role="application" aria-label={$t("Clavier de piano : cliquez ici pour jouer au clavier de l’ordinateur")} tabindex="0" bind:this={root} onkeydown={onKeyDown} onkeyup={onKeyUp} onfocusout={focusOut}>
   <header class="piano-heading">
-    <div class="heading-label"><Keyboard size={compact ? 14 : 18} /><strong>{compact ? 'Clavier' : 'Piano'}</strong>{#if !compact}<span>88 notes · La0 à Do8</span>{/if}</div>
+    <div class="heading-label"><Keyboard size={compact ? 14 : 18} /><strong>{compact ? $t('Clavier') : $t('Piano')}</strong>{#if !compact}<span>{$t('88 notes · {low} à {high}', { low: label(21), high: label(108) })}</span>{/if}</div>
     <div class="computer-controls">
-      <label class="layout-choice"><span class="sr-only">Disposition du clavier d’ordinateur</span><select aria-label="Disposition du clavier d’ordinateur" bind:value={layout} onchange={releasePC}><option value="azerty">AZERTY</option><option value="qwerty">QWERTY</option></select></label>
-      <div class="pc-octave" title="Registre des touches de l’ordinateur"><button type="button" aria-label="Descendre le registre du clavier d’ordinateur" disabled={pcBase <= 24} onclick={() => changePCOctave(-1)}><Minus size={12} /></button><span>PC <strong>{label(pcBase)}</strong></span><button type="button" aria-label="Monter le registre du clavier d’ordinateur" disabled={pcBase >= 96} onclick={() => changePCOctave(1)}><Plus size={12} /></button></div>
+      <label class="layout-choice"><span class="sr-only">{$t("Disposition du clavier d’ordinateur")}</span><select aria-label={$t("Disposition du clavier d’ordinateur")} bind:value={layout} onchange={releasePC}><option value="azerty">AZERTY</option><option value="qwerty">QWERTY</option></select></label>
+      <div class="pc-octave" title={$t("Registre des touches de l’ordinateur")}><button type="button" aria-label={$t("Descendre le registre du clavier d’ordinateur")} disabled={pcBase <= 24} onclick={() => changePCOctave(-1)}><Minus size={12} /></button><span>PC <strong>{label(pcBase)}</strong></span><button type="button" aria-label={$t("Monter le registre du clavier d’ordinateur")} disabled={pcBase >= 96} onclick={() => changePCOctave(1)}><Plus size={12} /></button></div>
     </div>
   </header>
   {#if !compact}
     <div class="piano-readouts">
-      <div class="played-readout"><span>NOTES JOUÉES</span><strong class:empty={!pressedNotes.length}>{pressedNotes.length ? pressedNotes.map(label).join(' · ') : 'Aucune touche enfoncée'}</strong></div>
-      <div class="voice-readout" class:listening={micActive}><Mic size={17} /><div><span>{micActive ? 'VOTRE VOIX' : 'MICRO EN PAUSE'}</span><strong>{validPitch !== null ? label(Math.round(validPitch)) : micActive ? 'Chantez une note…' : 'Activez le micro pour comparer'}{#if validPitch !== null}<small>{cents > 0 ? '+' : ''}{cents} cents · {frequency?.toFixed(1)} Hz</small>{/if}</strong></div></div>
+      <div class="played-readout"><span>{$t("NOTES JOUÉES")}</span><strong class:empty={!pressedNotes.length}>{pressedNotes.length ? pressedNotes.map(label).join(' · ') : $t('Aucune touche enfoncée')}</strong></div>
+      <div class="voice-readout" class:listening={micActive}><Mic size={17} /><div><span>{micActive ? $t('VOTRE VOIX') : $t('MICRO EN PAUSE')}</span><strong>{validPitch !== null ? label(Math.round(validPitch)) : micActive ? $t('Chantez une note…') : $t('Activez le micro pour comparer')}{#if validPitch !== null}<small>{cents > 0 ? '+' : ''}{cents} cents · {frequency?.toFixed(1)} Hz</small>{/if}</strong></div></div>
     </div>
   {/if}
-  <div class="keyboard-navigation"><span>{viewRange}</span><small>Glissez la réglette pour explorer</small><div><button type="button" aria-label="Voir l’octave précédente" disabled={!canPanLeft} onclick={() => pan(-1)}><ChevronLeft size={16} /></button><button type="button" aria-label="Recentrer sur les notes de la partition" title="Notes de la partition" onclick={() => scrollToNote(scoreNotes.find((note) => note.target)?.midi ?? scoreNotes[0]?.midi ?? pcBase, true)}><Music2 size={14} /></button><button type="button" class="recenter" aria-label={validPitch !== null ? 'Recentrer sur la voix détectée' : 'Recentrer sur le registre vocal'} onclick={() => scrollToNote(validPitch ?? 48, true)}><Crosshair size={14} /></button><button type="button" aria-label="Voir l’octave suivante" disabled={!canPanRight} onclick={() => pan(1)}><ChevronRight size={16} /></button></div></div>
+  <div class="keyboard-navigation"><span>{viewRange}</span><small>{$t("Glissez la réglette pour explorer")}</small><div><button type="button" aria-label={$t("Voir l’octave précédente")} disabled={!canPanLeft} onclick={() => pan(-1)}><ChevronLeft size={16} /></button><button type="button" aria-label={$t("Recentrer sur les notes de la partition")} title={$t("Notes de la partition")} onclick={() => scrollToNote(scoreNotes.find((note) => note.target)?.midi ?? scoreNotes[0]?.midi ?? pcBase, true)}><Music2 size={14} /></button><button type="button" class="recenter" aria-label={validPitch !== null ? $t('Recentrer sur la voix détectée') : $t('Recentrer sur le registre vocal')} onclick={() => scrollToNote(validPitch ?? 48, true)}><Crosshair size={14} /></button><button type="button" aria-label={$t("Voir l’octave suivante")} disabled={!canPanRight} onclick={() => pan(1)}><ChevronRight size={16} /></button></div></div>
   <div class="keyboard-scroll" bind:this={scrollArea} onscroll={updateViewport}>
     <div class="keyboard-stage">
       <div class="octave-rail" aria-hidden="true">{#each whites.filter((midi) => midi % 12 === 0) as midi}<span style:left="{(whiteIndex.get(midi) || 0) / whites.length * 100}%">{label(midi)}</span>{/each}</div>
-      <div class="keybed" role="group" aria-label="Touches du piano" bind:this={keybed} onpointermove={movePointer} onpointerup={finishPointer} onpointercancel={releaseAll} onlostpointercapture={finishPointer}>
+      <div class="keybed" role="group" aria-label={$t("Touches du piano")} bind:this={keybed} onpointermove={movePointer} onpointerup={finishPointer} onpointercancel={releaseAll} onlostpointercapture={finishPointer}>
         <div class="white-keys">{#each whites as midi}<button type="button" class="key white" class:pressed={pressed.has(midi)} class:target={score.get(midi) === true} class:accompaniment={score.has(midi) && !score.get(midi)} class:detected={nearestPitch === midi} data-piano-midi={midi} tabindex="-1" aria-label={`${label(midi)}, MIDI ${midi}`} aria-pressed={pressed.has(midi)} onpointerdown={(event) => startPointer(event, midi)}><span class="score-mark"></span>{#if pcLabel(midi)}<kbd>{pcLabel(midi)}</kbd>{/if}<span class="note-name">{#if !compact || midi % 12 === 0}{label(midi)}{/if}</span></button>{/each}</div>
         {#each blacks as midi}<button type="button" class="key black" class:pressed={pressed.has(midi)} class:target={score.get(midi) === true} class:accompaniment={score.has(midi) && !score.get(midi)} class:detected={nearestPitch === midi} style:left="{keyPosition(midi) / whites.length * 100}%" data-piano-midi={midi} tabindex="-1" aria-label={`${label(midi)}, MIDI ${midi}`} aria-pressed={pressed.has(midi)} onpointerdown={(event) => startPointer(event, midi)}><span class="score-mark"></span>{#if pcLabel(midi)}<kbd>{pcLabel(midi)}</kbd>{/if}</button>{/each}
         {#if marker !== null}<div class="voice-marker" style:left="{marker}%" aria-hidden="true"><span></span><i></i></div>{/if}
       </div>
     </div>
   </div>
-  <footer class="piano-footer"><div class="legend"><span><i class="target-dot"></i>Voix à travailler</span><span><i class="accompaniment-dot"></i>Accompagnement</span><span><i class="pressed-dot"></i>Joué</span><span><i class="voice-dot"></i>Micro</span></div><p>{compact ? 'Cliquez pour jouer · maintenez les touches' : 'Cliquez sur le piano pour jouer au clavier de l’ordinateur. Maintenez plusieurs touches pour un accord.'}</p></footer>
+  <footer class="piano-footer"><div class="legend"><span><i class="target-dot"></i>{$t("Voix à travailler")}</span><span><i class="accompaniment-dot"></i>{$t("Accompagnement")}</span><span><i class="pressed-dot"></i>{$t("Joué")}</span><span><i class="voice-dot"></i>{$t("Micro")}</span></div><p>{compact ? $t('Cliquez pour jouer · maintenez les touches') : $t('Cliquez sur le piano pour jouer au clavier de l’ordinateur. Maintenez plusieurs touches pour un accord.')}</p></footer>
 </section>
 
 <style>

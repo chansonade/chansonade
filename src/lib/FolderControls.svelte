@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t, translate } from './i18n';
   import { onMount } from 'svelte';
   import { Folder, FolderPlus, Pencil, Trash2, Check, X } from '@lucide/svelte';
   import { createFolder, renameFolder, deleteFolder, storageScope, subscribeStorage, type OrganizationSnapshot } from './storage';
@@ -19,7 +20,7 @@
       if (edit === 'rename') await renameFolder(id, name, scope);
       await onrefresh();
       if (scope === storageScope()) { selected = id; edit = null; }
-    } catch(cause) { onerror(cause instanceof Error ? cause.message : 'Impossible de sauvegarder ce dossier.'); }
+    } catch(cause) { onerror(cause instanceof Error ? translate(cause.message) : translate("Impossible de sauvegarder ce dossier.")); }
     finally { working = false; }
   }
   async function remove() {
@@ -27,15 +28,15 @@
     if (!confirmDelete) { confirmDelete = true; return; }
     const scope = storageScope(), id = folder.id; working = true;
     try { await deleteFolder(id, scope); await onrefresh(); if(scope === storageScope()) { selected = 'unfiled'; confirmDelete = false; } }
-    catch(cause) { onerror(cause instanceof Error ? cause.message : 'Impossible de supprimer ce dossier.'); }
+    catch(cause) { onerror(cause instanceof Error ? translate(cause.message) : translate("Impossible de supprimer ce dossier.")); }
     finally { working = false; }
   }
 </script>
 
 <div class="folder-controls">
-  <div class="folder-row"><Folder size={15} /><select aria-label="Filtrer par dossier" bind:value={selected} onchange={() => { confirmDelete = false; edit = null; }}><option value="all">Tous les dossiers</option><option value="unfiled">Non classés</option>{#each organization.folders as entry}<option value={entry.id}>{entry.name}</option>{/each}</select><button class="icon-button" aria-label="Créer un dossier" title="Créer un dossier" disabled={blocked || working} onclick={() => begin('create')}><FolderPlus size={17} /></button>{#if folder}<button class="icon-button" aria-label="Renommer le dossier" title="Renommer le dossier" disabled={blocked || working} onclick={() => begin('rename')}><Pencil size={15} /></button><button class="icon-button" aria-label="Supprimer le dossier" title="Supprimer le dossier" disabled={blocked || working} onclick={() => void remove()}><Trash2 size={15} /></button>{/if}</div>
-  {#if edit}<form onsubmit={save}><input aria-label="Nom du dossier" placeholder="Nom du dossier" maxlength="100" bind:value={name} required disabled={working} /><button class="icon-button" aria-label="Enregistrer le dossier" type="submit" disabled={working || !name.trim()}><Check size={17} /></button><button class="icon-button" aria-label="Annuler" type="button" onclick={() => edit = null}><X size={17} /></button></form>{/if}
-  {#if confirmDelete}<div class="folder-delete"><p>Les partitions et essais seront conservés dans « Non classés ».</p><button disabled={working} onclick={() => void remove()}>Supprimer ce dossier</button><button onclick={() => confirmDelete = false}>Annuler</button></div>{/if}
+  <div class="folder-row"><Folder size={15} /><select aria-label={$t("Filtrer par dossier")} bind:value={selected} onchange={() => { confirmDelete = false; edit = null; }}><option value="all">{$t("Tous les dossiers")}</option><option value="unfiled">{$t("Non classés")}</option>{#each organization.folders as entry}<option value={entry.id}>{entry.name}</option>{/each}</select><button class="icon-button" aria-label={$t("Créer un dossier")} title={$t("Créer un dossier")} disabled={blocked || working} onclick={() => begin('create')}><FolderPlus size={17} /></button>{#if folder}<button class="icon-button" aria-label={$t("Renommer le dossier")} title={$t("Renommer le dossier")} disabled={blocked || working} onclick={() => begin('rename')}><Pencil size={15} /></button><button class="icon-button" aria-label={$t("Supprimer le dossier")} title={$t("Supprimer le dossier")} disabled={blocked || working} onclick={() => void remove()}><Trash2 size={15} /></button>{/if}</div>
+  {#if edit}<form onsubmit={save}><input aria-label={$t("Nom du dossier")} placeholder={$t("Nom du dossier")} maxlength="100" bind:value={name} required disabled={working} /><button class="icon-button" aria-label={$t("Enregistrer le dossier")} type="submit" disabled={working || !name.trim()}><Check size={17} /></button><button class="icon-button" aria-label={$t("Annuler")} type="button" onclick={() => edit = null}><X size={17} /></button></form>{/if}
+  {#if confirmDelete}<div class="folder-delete"><p>{$t("Les partitions et essais seront conservés dans « Non classés ».")}</p><button disabled={working} onclick={() => void remove()}>{$t("Supprimer ce dossier")}</button><button onclick={() => confirmDelete = false}>{$t("Annuler")}</button></div>{/if}
 </div>
 
 <style>

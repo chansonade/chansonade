@@ -111,3 +111,18 @@ licences, dont le statut distinct du logo : voir [THIRD_PARTY.md](../THIRD_PARTY
 Les [instructions de sources](SOURCES.md) expliquent la reconstruction et les
 archives tierces ; la [procédure de publication](PUBLISHING.md) décrit la préparation
 d'un dépôt public sans données privées ni corpus de travail.
+
+## Langue de l’interface
+
+`i18n.ts` fournit un store de langue FR/EN/DE/NL et un traducteur réactif, avec
+interpolation de paramètres nommés. Les clés sont les textes français ; les
+dictionnaires `messages-app.ts` et `messages-components.ts` portent les trois
+traductions. Une clé inconnue conserve son texte source, notamment pour les erreurs
+techniques provenant du navigateur. `LanguagePicker.svelte` affiche le menu de langue.
+
+Avant le montage, `initializeLanguage()` reprend `chansonade.language` ou la langue
+navigateur prise en charge, avec anglais par défaut. Le choix met à jour `html.lang`
+et les autres onglets via l’événement storage. Cette préférence appartient à
+l’appareil et ne fait pas partie des réglages synchronisés. Les notes du piano et
+les dates suivent la langue ; titres, paroles et noms utilisateur ne sont pas traduits.
+La traduction ne participe pas aux dépendances de gravure ni au cycle audio.
