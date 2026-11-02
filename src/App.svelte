@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import { Play, Pause, RotateCcw, SkipBack, SkipForward, Repeat2, Mic, MicOff, Maximize2, Minimize2, PanelLeft, Library, Upload, ChevronRight, ChevronDown, X, Plus, Minus, SlidersHorizontal, ArrowRight, ArrowDown, Music2, Piano, Crosshair, Check, Volume2, VolumeX, Download, CircleHelp, LoaderCircle, Circle, Square, UserRound, MoreHorizontal, AudioLines } from '@lucide/svelte';
-  import { zipSync, strToU8 } from 'fflate';
   import { Score, examples, readMusicXML, metadata, indexGeometry, frameAt, measureAt, type MusicalData, type ScoreGeometry, type ViewMode, type Part, type NotePosition } from './lib/score';
   import { AudioPlayer } from './lib/audio';
   import PianoKeyboard from './lib/PianoKeyboard.svelte';
@@ -10,6 +9,7 @@
   import RepositoryLink from './lib/RepositoryLink.svelte';
   import Brand from './lib/Brand.svelte';
   import LanguagePicker from './lib/LanguagePicker.svelte';
+  import { MAX_SCORE_ARCHIVE_BYTES } from './lib/score-import';
   import { t, locale, noteName } from './lib/i18n';
   import TakePanel from './lib/TakePanel.svelte';
   import { takeMoment, takePitchSamples, takePitchCount, takeTraceStarts } from './lib/take-playback';
@@ -19,11 +19,12 @@
   import { readOrganization, folderFor, moveItem, type OrganizationSnapshot } from './lib/storage';
   import { measuresInLoop, canonicalLoopBounds } from './lib/loop';
   import { syncState, startSync, setTakeSyncPaused } from './lib/sync';
-  import { PitchInput, type PitchResult } from './lib/pitch';
+  import { PitchInput, type PitchResult, type RecordingEndReason } from './lib/pitch';
   import { projectPitchTrace, type PitchSample } from './lib/projection';
   import { CaptureTimeline } from './lib/timeline';
-  import { PITCH_CONFIG } from './lib/pitch-config';
-  import { savedScores, saveScore, scoreId, readSettings, writeSettings, storageScope, subscribeStorage, saveTake, listTakes, latestTake as loadLatestTake, type SavedScore, type RecordedTake, type TakePitch, type TakeTransport, type PracticeSettings } from './lib/storage';
+  import { finishCapturedTake, takeArchive, TakeMetadataBudget, type TakeCapture } from './lib/take-session';
+  import { requestPersistentStorage } from './lib/storage-health';
+  import { savedScores, saveScore, scoreId, readSettings, writeSettings, storageScope, subscribeStorage, listTakes, latestTake as loadLatestTake, type SavedScore, type RecordedTake, type TakePitch, type TakeTransport } from './lib/storage';
 
   let engine: Score;
   const audio = new AudioPlayer();
@@ -48,11 +49,15 @@
   let documentStarted = false;
   let defaultParts: Part[] = [];
   let pendingAccountScope = $state<string | null>(null);
-  const initialInvitation = new URLSearchParams(window.location.hash.slice(1)).get('invitation') || '';
+  const initialTokens = new URLSearchParams(window.location.hash.slice(1));
+  const initialInvitation = initialTokens.get('invitation') || '';
+  const initialReset = initialTokens.get('reset') || '';
   const requestedCatalogId = new URLSearchParams(window.location.search).get('score');
+  const catalogueURL = import.meta.env.VITE_CATALOGUE_URL || '';
   let invitation = $state(initialInvitation);
-  let accountOpen = $state(!!initialInvitation);
-  if (initialInvitation) history.replaceState(null, '', `${location.pathname}${location.search}`);
+  let resetToken = $state(initialReset);
+  let accountOpen = $state(!!initialInvitation || !!initialReset);
+  if (initialInvitation || initialReset) history.replaceState(null, '', `${location.pathname}${location.search}`);
   let customScores = $state<SavedScore[]>([]);
   let organization = $state<OrganizationSnapshot>({folders:[],placements:{}});
   let libraryTab = $state<'personal'|'public'>('public');
@@ -131,7 +136,9 @@
     const end = takePitchCount(replaySamples, replayPosition);
     return replaySamples.slice(replayTraceStarts[end - 1] || 0, end);
   });
-  let takeCapture: { scope: string; folderId:string|null; startedAt: number; createdAt: number; scoreId: string; title: string; scoreXML: string; settings: PracticeSettings; latencyMs: number; pitches: TakePitch[]; transport: TakeTransport[] } | null = null;
+  let takeCapture: TakeCapture | null = null;
+  let takeMetadataBudget: TakeMetadataBudget | null = null;
+  let pendingTakeEnd: RecordingEndReason | null = null;
   let takeRequest = 0;
   let takeStop: Promise<void> | null = null;
   let takeOpenedMic = false;
@@ -337,9 +344,11 @@
 
   async function importFile(file?: File) {
     if (!file) return;
+    void requestPersistentStorage();
     const importScope = storageScope();
     const importFolder = organization.folders.find(folder => folder.id === libraryFolder)?.id || null;
     try {
+      if (file.size > MAX_SCORE_ARCHIVE_BYTES) throw new Error('L’archive MXL dépasse la limite de 10 Mio.');
       const xml = readMusicXML(await file.arrayBuffer());
       const info = metadata(xml, file.name);
       const id = await scoreId(xml);
@@ -461,7 +470,7 @@
     if (!replayTake && (looped || time < previousTime - 0.08)) clearPitchTrace();
     if (takeCapture && (looped || now - lastTakeTransport >= 100)) {
       takeSeconds = Math.max(0, pitch.currentTime - takeCapture.startedAt);
-      takeCapture.transport.push({ time: takeSeconds, scoreTime: time, playing, rate, targetChannel, transpose: parts.find((p) => p.channel === targetChannel)?.transpose || 0 });
+      addTakeMetadata('transport', { time: takeSeconds, scoreTime: time, playing, rate, targetChannel, transpose: parts.find((p) => p.channel === targetChannel)?.transpose || 0 });
       lastTakeTransport = now;
       if (!countIn && audio.ended) void finishTake();
     }
@@ -617,9 +626,20 @@
     pitch.stop(); micActive = false; pitchResult = null; pitchError = null;
     await toggleMic();
   }
+  function addTakeMetadata(kind: 'pitch' | 'transport', point: TakePitch | TakeTransport) {
+    const capture = takeCapture;
+    if (!capture || !takeMetadataBudget || capture.metadataLimitReached) return;
+    if (!takeMetadataBudget.append(point)) {
+      capture.metadataLimitReached = true;
+      if (takePhase !== 'saving') recordingEnded('limit');
+      return;
+    }
+    if (kind === 'pitch') capture.pitches.push(point as TakePitch);
+    else capture.transport.push(point as TakeTransport);
+  }
   function observeTransport(discontinuity = false) {
     if (pitch?.active) captureTimeline.observe(pitch.currentTime, audio.time, rate, audio.playing, discontinuity);
-    if (takeCapture) takeCapture.transport.push({ time: Math.max(0, pitch.currentTime - takeCapture.startedAt), scoreTime: audio.time, playing: audio.playing, rate, targetChannel, transpose: targetPart?.transpose || 0 });
+    if (takeCapture) addTakeMetadata('transport', { time: Math.max(0, pitch.currentTime - takeCapture.startedAt), scoreTime: audio.time, playing: audio.playing, rate, targetChannel, transpose: targetPart?.transpose || 0 });
   }
   function clearPitchTrace() {
     pitchSamples = [];
@@ -650,7 +670,7 @@
     const { sample, note, transpose } = context;
     if (visibleSample(sample)) displayPitch(result, context);
     if (takeCapture && result.time >= takeCapture.startedAt) {
-      takeCapture.pitches.push({ time: result.time - takeCapture.startedAt, frequency: result.frequency, rawFrequency: result.rawFrequency ?? result.frequency, clarity: result.clarity, rms: result.rms, midi: result.midi, cents: result.cents, scoreTime: sample.scoreTime, expectedPitch: note ? note.pitch + transpose : null, noteId: note?.id || null, targetChannel, playing: sample.playing, staff: sample.staff, transpose: sample.transpose, epoch: sample.epoch });
+      addTakeMetadata('pitch', { time: result.time - takeCapture.startedAt, frequency: result.frequency, rawFrequency: result.rawFrequency ?? result.frequency, clarity: result.clarity, rms: result.rms, midi: result.midi, cents: result.cents, scoreTime: sample.scoreTime, expectedPitch: note ? note.pitch + transpose : null, noteId: note?.id || null, targetChannel, playing: sample.playing, staff: sample.staff, transpose: sample.transpose, epoch: sample.epoch });
     }
     if (visibleSample(sample)) pitchSamples.push(sample);
   }
@@ -722,8 +742,17 @@
     position = Math.min(duration, takeMoment(replayTake, time).scoreTime);
     updateVisual(position, 0.016, true);
   }
+  function recordingEnded(reason: RecordingEndReason) {
+    if (reason === 'interrupted') { micActive = false; pitchResult = null; pitchError = null; }
+    audio.pause();
+    if (takeCapture) { void finishTake(reason); return; }
+    if (takePhase === 'preparing') { pendingTakeEnd = reason; return; }
+    if (reason === 'interrupted') { pitch.stop(); notify('Micro interrompu.'); }
+  }
   async function startTake() {
     if (!audioReady || takePhase !== 'idle') return;
+    void requestPersistentStorage();
+    pendingTakeEnd = null;
     stopReplay();
     const scope = storageScope();
     const request = ++takeRequest;
@@ -738,12 +767,18 @@
       if (request !== takeRequest) return;
       setFollow(true);
       clearPitchTrace();
+      const draft: TakeCapture = { scope, folderId:folderFor(organization,'score',currentId), startedAt: pitch.currentTime, createdAt: Date.now(), scoreId: currentId, title, scoreXML: currentXML, settings: JSON.parse(JSON.stringify({ rate, loopA, loopB, loopEnabled, target: targetChannel, parts })), latencyMs: latency, pitches: [], transport: [] };
+      const budget = new TakeMetadataBudget(draft);
+      if (!budget.fits) throw new Error('La partition est trop volumineuse pour enregistrer un essai.');
       const start = await pitch.startRecording();
       if (request !== takeRequest) { await pitch.stopRecording().catch(() => {}); return; }
-      takeCapture = { scope, folderId:folderFor(organization,'score',currentId), startedAt: start.startedAt, createdAt: Date.now(), scoreId: currentId, title, scoreXML: currentXML, settings: JSON.parse(JSON.stringify({ rate, loopA, loopB, loopEnabled, target: targetChannel, parts })), latencyMs: latency, pitches: [], transport: [] };
-      observeTransport();
+      takeCapture = { ...draft, startedAt: start.startedAt };
+      takeMetadataBudget = budget;
       takeSeconds = 0;
       takePhase = 'recording';
+      observeTransport();
+      if (takePhase !== 'recording') return;
+      if (pendingTakeEnd) { const reason = pendingTakeEnd; pendingTakeEnd = null; await finishTake(reason); return; }
       for (let remaining = 3; remaining > 0; remaining--) {
         if (request !== takeRequest) return;
         countIn = remaining;
@@ -758,7 +793,8 @@
       if (request !== takeRequest) return;
       if (takeCapture) await finishTake();
       else {
-        if (takeOpenedMic) { pitch.stop(); micActive = false; }
+        if (takeOpenedMic || !pitch.active) { pitch.stop(); micActive = false; }
+        pendingTakeEnd = null;
         takePhase = 'idle';
       }
       notify(cause instanceof Error ? cause.message : 'Impossible de démarrer l’essai.');
@@ -770,7 +806,7 @@
     takePhase = 'idle';
     if (takeOpenedMic) { pitch.stop(); micActive = false; }
   }
-  function finishTake(): Promise<void> {
+  function finishTake(reason?: RecordingEndReason): Promise<void> {
     if (takeStop) return takeStop;
     if (!takeCapture) return Promise.resolve();
     ++takeRequest;
@@ -781,17 +817,16 @@
     const captured = takeCapture;
     takeStop = (async () => {
       try {
-        const recording = await pitch.stopRecording();
+        const { take, persisted } = await finishCapturedTake(pitch, captured);
         takeCapture = null;
-        const take: RecordedTake = { id: crypto.randomUUID(), createdAt: captured.createdAt, title: captured.title, scoreId: captured.scoreId, scoreXML: captured.scoreXML, audio: recording.audio, duration: recording.duration, sampleRate: recording.sampleRate, samples: recording.samples, input: pitch.inputInfo, captureStartedAt: captured.startedAt, settings: captured.settings, latencyMs: captured.latencyMs, detector: { ...PITCH_CONFIG }, pitches: captured.pitches.filter((p) => p.time <= recording.duration), transport: captured.transport.filter((p) => p.time <= recording.duration) };
         if (captured.scope === storageScope()) showTake(take);
-        take.analysisComplete = recording.analysisComplete;
-        try { await saveTake(take, captured.scope, captured.folderId); notify(recording.analysisComplete ? 'Essai enregistré. Le son et la courbe sont conservés.' : 'Son enregistré. La fin de la courbe n’a pas pu être analysée.'); }
-        catch { memoryTakes = [...memoryTakes, { scope: captured.scope, take }]; notify('Essai disponible en mémoire : exportez-le pour le conserver.'); }
+        if (persisted) notify(reason === 'limit' ? 'Limite d’enregistrement atteinte : essai enregistré.' : reason === 'interrupted' ? 'Micro interrompu : le son reçu a été enregistré.' : take.analysisComplete ? 'Essai enregistré. Le son et la courbe sont conservés.' : 'Son enregistré. La fin de la courbe n’a pas pu être analysée.');
+        else { memoryTakes = [...memoryTakes, { scope: captured.scope, take }]; notify('Essai disponible en mémoire : exportez-le pour le conserver.'); }
       } catch (cause) { notify(cause instanceof Error ? cause.message : 'La sauvegarde de l’essai a échoué.'); }
       finally {
         takeCapture = null;
-        if (takeOpenedMic) { pitch.stop(); micActive = false; pitchResult = null; }
+        takeMetadataBudget = null;
+        if (takeOpenedMic || !pitch.active) { pitch.stop(); micActive = false; pitchResult = null; }
         takePhase = 'idle';
         takeStop = null;
         showControls();
@@ -801,9 +836,7 @@
   }
   async function exportTake(take = lastTake) {
     if (!take) return;
-    const { audio: blob, scoreXML, ...analysis } = take;
-    const bytes = zipSync({ 'voice.wav': new Uint8Array(await blob.arrayBuffer()), 'analysis.json': strToU8(JSON.stringify(analysis, null, 2)), 'score.musicxml': strToU8(scoreXML) });
-    const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: 'application/zip' }));
+    const url = URL.createObjectURL(await takeArchive(take));
     const link = document.createElement('a');
     link.href = url; link.download = `chansonade-essai-${new Date(take.createdAt).toISOString().replace(/[:.]/g, '-')}.zip`; link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -873,7 +906,11 @@
 
   onMount(() => {
     engine = new Score();
-    pitch = new PitchInput(receivePitch, receivePreview);
+    pitch = new PitchInput(receivePitch, receivePreview, recordingEnded);
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (takePhase !== 'idle' || memoryTakes.length) { event.preventDefault(); event.returnValue = ''; }
+    };
+    window.addEventListener('beforeunload', beforeUnload);
     void refreshMicrophones();
     const devicesChanged = () => void refreshMicrophones();
     navigator.mediaDevices?.addEventListener('devicechange', devicesChanged);
@@ -888,9 +925,10 @@
     };
     const fullscreenChanged = () => { fullscreen = !!document.fullscreenElement; };
     const invitationChanged = () => {
-      const token = new URLSearchParams(location.hash.slice(1)).get('invitation');
-      if (!token) return;
-      invitation = token; accountOpen = true;
+      const tokens = new URLSearchParams(location.hash.slice(1));
+      const token = tokens.get('invitation'), reset = tokens.get('reset');
+      if (!token && !reset) return;
+      invitation = token || ''; resetToken = reset || ''; accountOpen = true;
       history.replaceState(null, '', `${location.pathname}${location.search}`);
     };
     window.addEventListener('hashchange', invitationChanged);
@@ -933,6 +971,7 @@
       const saving = takeCapture ? finishTake() : takeStop;
       void (saving || Promise.resolve()).finally(() => { pitch.stop(); void audio.destroy(); });
       stopReplay();
+      window.removeEventListener('beforeunload', beforeUnload);
       window.removeEventListener('hashchange', invitationChanged);
       window.removeEventListener('resize', resized); window.removeEventListener('keydown', onKey); document.removeEventListener('fullscreenchange', fullscreenChanged);
     };
@@ -945,7 +984,7 @@
   <input class="sr-only" type="file" accept=".mxl,.musicxml,.xml" bind:this={fileInput} onchange={(e) => void importFile(e.currentTarget.files?.[0])} aria-label={$t("Importer une partition")} />
 
   <header class="app-header">
-    <div class="brand-navigation"><button class="icon-button library-toggle" title={$t("Bibliothèque")} aria-label={$t("Bibliothèque")} aria-expanded={libraryOpen} onclick={() => libraryOpen = !libraryOpen}><PanelLeft size={20} /></button><a href={import.meta.env.BASE_URL} aria-label={$t("Chansonade, accueil")}><Brand /></a></div>
+    <div class="brand-navigation"><button class="icon-button library-toggle" title={$t("Bibliothèque")} aria-label={$t("Bibliothèque")} aria-expanded={libraryOpen} onclick={() => libraryOpen = !libraryOpen}><PanelLeft size={20} /></button><a href={import.meta.env.BASE_URL} aria-label={$t("Chansonade, accueil")} onclick={event => { if (takePhase !== 'idle') event.preventDefault(); }}><Brand /></a></div>
     <div class="document-title">
       <div class="document-heading"><h1>{music ? title : $t('Ouvrir une partition')}</h1>{#if composer}<p>{composer}</p>{/if}</div>
       <div class="document-meta">
@@ -977,7 +1016,7 @@
         {:else}
           <label class="catalog-folder-label" for="catalog-folder">{$t("Dossier public")}</label><select id="catalog-folder" aria-label={$t("Dossier public")} bind:value={catalogGroup}>{#each catalogGroups as group}<option value={group.id}>{$t(group.name)}</option>{/each}</select>
           <p class="catalog-description">{$t("Partitions gratuites, prêtes à chanter. Votre pratique et vos essais restent privés.")}</p>
-          <a class="public-catalog-link" href="{import.meta.env.BASE_URL}catalogue/#{catalogGroup}">{$t("Ouvrir le catalogue partageable")} <ArrowRight size={13} /></a>
+          {#if catalogueURL}<a class="public-catalog-link" href={`${catalogueURL}#${catalogGroup}`} target="_blank" rel="noopener noreferrer">{$t("Ouvrir le catalogue partageable")} <ArrowRight size={13} /></a>{/if}
           <div class="library-label">{$t(catalogGroups.find(group => group.id === catalogGroup)?.name || '')}<span>{filteredPublic.length}</span></div>
           {#each filteredPublic as piece}
             <article class="catalog-piece"><button class="piece" class:chosen={currentId === piece.id} onclick={() => void openExample(piece)}><span class="piece-number"><Music2 size={16} /></span><span class="piece-description"><strong>{piece.title}</strong><small>{piece.composer}</small><small>{$t(piece.level)}{#if piece.minMidi !== undefined && piece.maxMidi !== undefined} · {noteLabel(piece.minMidi)}–{noteLabel(piece.maxMidi)}{/if}</small></span>{#if currentId === piece.id}<span class="piece-dot"></span>{/if}</button><div class="catalog-piece-actions"><span>{piece.license === 'CC0-1.0' ? 'CC0' : 'CC BY-SA'}</span><button disabled={addingPublic || takePhase !== 'idle' || customScores.some(score => score.id === piece.id)} onclick={() => void addPublicPiece(piece)}>{#if customScores.some(score => score.id === piece.id)}<Check size={13} /> {$t("Dans ma bibliothèque")}{:else}<Plus size={13} /> {$t("Ajouter à mes partitions")}{/if}</button></div><details class="catalog-credits"><summary>{$t("Source et licence")}</summary><p>{piece.credits} · <a href={piece.sourceUrl} target="_blank" rel="noopener noreferrer">{$t("Source")}</a> · <a href={piece.licenseUrl} target="_blank" rel="noopener noreferrer">{piece.license}</a></p></details></article>
@@ -1032,7 +1071,7 @@
           <div class="recording-strip">
             <div class="take-actions">
 
-              <button class="take-button" class:recording={takePhase === 'recording'} disabled={!audioReady || takePhase === 'preparing' || takePhase === 'saving'} aria-label={takePhase === 'recording' ? $t('Arrêter l’essai') : $t('Enregistrer un essai')} title={lastTake ? $t('Dernier essai conservé · {duration}', {duration: timeLabel(lastTake.duration)}) : $t('Enregistrer un essai')} onclick={() => takePhase === 'recording' ? void finishTake() : void startTake()}>{#if takePhase === 'preparing' || takePhase === 'saving'}<LoaderCircle class="spin" size={15} />{:else if takePhase === 'recording'}<Square size={13} fill="currentColor" />{:else}<Circle size={13} fill="currentColor" />{/if}<span>{takePhase === 'preparing' ? $t('Préparation…') : takePhase === 'saving' ? $t('Sauvegarde…') : takePhase === 'recording' ? countIn ? `${countIn}…` : timeLabel(takeSeconds) : $t('Enregistrer')}</span></button>
+              <button class="take-button" class:recording={takePhase === 'recording'} disabled={!audioReady || takePhase === 'preparing' || takePhase === 'saving'} aria-label={takePhase === 'recording' ? $t('Arrêter l’essai') : $t('Enregistrer un essai')} title={$t('Enregistrement : 10 minutes maximum et moins de 64 Mio ; la durée dépend de la fréquence audio.')} onclick={() => takePhase === 'recording' ? void finishTake() : void startTake()}>{#if takePhase === 'preparing' || takePhase === 'saving'}<LoaderCircle class="spin" size={15} />{:else if takePhase === 'recording'}<Square size={13} fill="currentColor" />{:else}<Circle size={13} fill="currentColor" />{/if}<span>{takePhase === 'preparing' ? $t('Préparation…') : takePhase === 'saving' ? $t('Sauvegarde…') : takePhase === 'recording' ? countIn ? `${countIn}…` : timeLabel(takeSeconds) : $t('Enregistrer')}</span></button>
             </div>
             <span class="take-status sr-only" role="status">{#if takePhase === 'recording'}{countIn ? $t('Départ dans {count}…', {count: countIn}) : $t('Essai en cours · {duration}', {duration: timeLabel(takeSeconds)})}{:else if takePhase === 'saving'}{$t("Sauvegarde de l’essai…")}{:else if lastTake}{$t('Dernier essai conservé · {duration}', {duration: timeLabel(lastTake.duration)})}{/if}</span>
           </div>
@@ -1058,8 +1097,8 @@
   {#if toast}<div class="toast" role="status"><Check size={16} /><span>{$t(toast)}</span><button class="icon-button small" aria-label={$t("Fermer le message")} onclick={() => toast = ''}><X size={14} /></button></div>{/if}
 
   {#if helpOpen}
-    <div class="modal-backdrop" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) helpOpen = false; }}><div class="help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title" tabindex="-1"><button class="icon-button close-dialog" aria-label={$t("Fermer l’aide")} onclick={() => helpOpen = false}><X size={20} /></button><Brand /><h2 id="help-title">{$t("Aide et raccourcis")}</h2><p>{$t("Ouvrez une partition MusicXML, choisissez votre tempo et répétez un passage. Vos fichiers et le son du micro sont traités sur cet appareil.")}</p><div class="help-shortcuts"><span>{$t("Lecture / pause")}<kbd>{$t("Espace")}</kbd></span><span>{$t("Note précédente / suivante")}<kbd>← →</kbd></span><span>{$t("Choisir un passage")}<kbd>L</kbd></span><span>{$t("Plein écran")}<kbd>F</kbd></span></div><p class="help-note">{$t("Sur téléphone, le mode Auto propose la partition en portrait et le ruban en paysage. Touchez la partition pour retrouver les commandes.")}</p><p class="help-note">{$t("Client sous GPLv3 ·")} <a href="{import.meta.env.BASE_URL}source/chansonade-source.tar.gz">{$t("Code source")}</a> · <a href="{import.meta.env.BASE_URL}legal/THIRD_PARTY.md">{$t("Licences et crédits")}</a></p><button class="primary-button" onclick={() => helpOpen = false}>{$t("Fermer")}</button></div></div>
+    <div class="modal-backdrop" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) helpOpen = false; }}><div class="help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title" tabindex="-1"><button class="icon-button close-dialog" aria-label={$t("Fermer l’aide")} onclick={() => helpOpen = false}><X size={20} /></button><Brand /><h2 id="help-title">{$t("Aide et raccourcis")}</h2><p>{$t("Ouvrez une partition MusicXML, choisissez votre tempo et répétez un passage. Vos fichiers et le son du micro sont traités sur cet appareil.")}</p><div class="help-shortcuts"><span>{$t("Lecture / pause")}<kbd>{$t("Espace")}</kbd></span><span>{$t("Note précédente / suivante")}<kbd>← →</kbd></span><span>{$t("Choisir un passage")}<kbd>L</kbd></span><span>{$t("Plein écran")}<kbd>F</kbd></span></div><p class="help-note">{$t("Un essai dure au maximum 10 minutes et occupe moins de 64 Mio. Selon la fréquence audio et la taille de la partition, la limite peut être plus courte.")}</p><p class="help-note">{$t("Sur téléphone, le mode Auto propose la partition en portrait et le ruban en paysage. Touchez la partition pour retrouver les commandes.")}</p><p class="help-note">{$t("Client sous GPLv3 ·")} <a href="{import.meta.env.BASE_URL}source/chansonade-source.tar.gz">{$t("Code source")}</a> · <a href="{import.meta.env.BASE_URL}legal/THIRD_PARTY.md">{$t("Licences et crédits")}</a></p><button class="primary-button" onclick={() => helpOpen = false}>{$t("Fermer")}</button></div></div>
   {/if}
   {#if takesOpen}<TakePanel memoryTakes={memoryTakes.filter(entry => entry.scope === takeScope).map(entry => entry.take)} ondiscard={id => memoryTakes = memoryTakes.filter(entry => entry.scope !== takeScope || entry.take.id !== id)} onclose={() => takesOpen = false} onplay={replay} onexport={take => void exportTake(take)} onerror={notify} blocked={takePhase !== 'idle'} />{/if}
-  {#if accountOpen}<AccountPanel onclose={() => accountOpen = false} beforechange={savePractice} blocked={takePhase !== 'idle'} bind:invitation />{/if}
+  {#if accountOpen}<AccountPanel onclose={() => accountOpen = false} beforechange={savePractice} ondelete={scope => memoryTakes = memoryTakes.filter(entry => entry.scope !== scope)} blocked={takePhase !== 'idle'} bind:invitation bind:resetToken />{/if}
 </div>

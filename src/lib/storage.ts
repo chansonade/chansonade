@@ -164,7 +164,8 @@ async function migrateTakes(connection: IDBDatabase) {
 
 export async function saveTake(take: RecordedTake, scope = activeScope, folderId?: string | null) {
   const connection = await db();
-  await transaction(connection, ['takeData', 'takeIndex', 'resources', 'outbox'], 'readwrite', async tx => {
+  await transaction(connection, ['takeData', 'takeIndex', 'resources', 'outbox', 'meta'], 'readwrite', async tx => {
+    await assertAccountPresent(tx, scope);
     if (folderId != null) checkFolderId(folderId);
     const index = tx.objectStore('takeIndex');
     const old = await requestValue<TakeIndex | undefined>(index.get([scope, take.id]));
@@ -198,7 +199,8 @@ export async function latestTake(scope = activeScope): Promise<RecordedTake | nu
 }
 export async function deleteTake(id: string, scope = activeScope) {
   const connection = await db();
-  await transaction(connection, ['takeData', 'takeIndex', 'resources', 'outbox'], 'readwrite', async tx => {
+  await transaction(connection, ['takeData', 'takeIndex', 'resources', 'outbox', 'meta'], 'readwrite', async tx => {
+    await assertAccountPresent(tx, scope);
     const index = tx.objectStore('takeIndex');
     const record = await requestValue<TakeIndex | undefined>(index.get([scope, id]));
     if (!record || record.deleted) return;
@@ -215,7 +217,8 @@ export async function claimAnonymousTakes(scope: string) {
   if (scope === ANONYMOUS_SCOPE) return;
   const connection = await db();
   let moved = false;
-  await transaction(connection, ['takeData', 'takeIndex', 'resources', 'outbox'], 'readwrite', async tx => {
+  await transaction(connection, ['takeData', 'takeIndex', 'resources', 'outbox', 'meta'], 'readwrite', async tx => {
+    await assertAccountPresent(tx, scope);
     const index = tx.objectStore('takeIndex'), data = tx.objectStore('takeData'), resources = tx.objectStore('resources');
     const records = await requestValue<TakeIndex[]>(index.index('scope').getAll(ANONYMOUS_SCOPE));
     for (const record of records) {
@@ -244,7 +247,8 @@ export async function takeSyncEntries(scope: string): Promise<TakeIndex[]> {
 }
 export async function acknowledgeTake(scope: string, id: string, change: number) {
   const connection = await db();
-  await transaction(connection, ['takeIndex'], 'readwrite', async tx => {
+  await transaction(connection, ['takeIndex', 'meta'], 'readwrite', async tx => {
+    await assertAccountPresent(tx, scope);
     const store = tx.objectStore('takeIndex');
     const record = await requestValue<TakeIndex | undefined>(store.get([scope, id]));
     if (!record || record.change !== change) return;
@@ -255,7 +259,8 @@ export async function acknowledgeTake(scope: string, id: string, change: number)
 export async function applyRemoteTake(scope: string, id: string, take: RecordedTake | null) {
   const connection = await db();
   let didChange = false;
-  await transaction(connection, ['takeData', 'takeIndex'], 'readwrite', async tx => {
+  await transaction(connection, ['takeData', 'takeIndex', 'meta'], 'readwrite', async tx => {
+    await assertAccountPresent(tx, scope);
     const index = tx.objectStore('takeIndex'), data = tx.objectStore('takeData');
     const current = await requestValue<TakeIndex | undefined>(index.get([scope, id]));
     // A local deletion wins over an in-flight download. A server tombstone
@@ -358,6 +363,7 @@ export async function readSettings(id: string, scope = activeScope): Promise<Pra
   return record && !record.deleted ? record.data as PracticeSettings : null;
 }
 async function writeResourceInTransaction(tx: IDBTransaction, kind: ResourceKind, id: string, data: ResourceData | null, scope: string) {
+  await assertAccountPresent(tx, scope);
   const resources = tx.objectStore('resources'), outbox = tx.objectStore('outbox');
   const existing = await requestValue<LocalResource | undefined>(resources.get(key(scope, kind, id)));
   if (existing && JSON.stringify(existing.data) === JSON.stringify(data) && existing.deleted === (data === null)) return;
@@ -371,7 +377,7 @@ async function writeResourceInTransaction(tx: IDBTransaction, kind: ResourceKind
 }
 async function writeResource(kind: ResourceKind, id: string, data: ResourceData | null, scope: string) {
   const connection = await db();
-  await transaction(connection, ['resources', 'outbox'], 'readwrite', tx => writeResourceInTransaction(tx, kind, id, data, scope));
+  await transaction(connection, ['resources', 'outbox', 'meta'], 'readwrite', tx => writeResourceInTransaction(tx, kind, id, data, scope));
   changed(scope, 'write');
 }
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -408,7 +414,7 @@ export async function createFolder(name: string, scope = activeScope): Promise<s
 }
 export async function renameFolder(id: string, name: string, scope = activeScope): Promise<void> {
   checkFolderId(id); const value = checkedFolderName(name), connection = await db();
-  await transaction(connection, ['resources', 'outbox'], 'readwrite', async tx => {
+  await transaction(connection, ['resources', 'outbox', 'meta'], 'readwrite', async tx => {
     const record = await requestValue<LocalResource | undefined>(tx.objectStore('resources').get(key(scope, 'organization', `folder.${id}`)));
     if (!record || record.deleted || !record.data || !('type' in record.data) || record.data.type !== 'folder') throw new Error('Dossier introuvable.');
     await writeResourceInTransaction(tx, 'organization', `folder.${id}`, { ...record.data, name: value }, scope);
@@ -417,7 +423,7 @@ export async function renameFolder(id: string, name: string, scope = activeScope
 }
 export async function deleteFolder(id: string, scope = activeScope): Promise<void> {
   checkFolderId(id); const connection = await db();
-  await transaction(connection, ['resources', 'outbox'], 'readwrite', async tx => {
+  await transaction(connection, ['resources', 'outbox', 'meta'], 'readwrite', async tx => {
     const records = await requestValue<LocalResource[]>(tx.objectStore('resources').index('scopeKind').getAll([scope, 'organization']));
     await writeResourceInTransaction(tx, 'organization', `folder.${id}`, null, scope);
     for (const record of records) if (!record.deleted && record.data && 'type' in record.data && record.data.type === 'placement' && record.data.folderId === id)
@@ -428,7 +434,7 @@ export async function deleteFolder(id: string, scope = activeScope): Promise<voi
 export async function moveItem(kind: 'score' | 'take', id: string, folderId: string | null, scope = activeScope): Promise<void> {
   checkedItem(kind, id); if (folderId !== null) checkFolderId(folderId);
   const connection = await db();
-  await transaction(connection, ['resources', 'outbox'], 'readwrite', async tx => {
+  await transaction(connection, ['resources', 'outbox', 'meta'], 'readwrite', async tx => {
     if (folderId !== null) {
       const folder = await requestValue<LocalResource | undefined>(tx.objectStore('resources').get(key(scope, 'organization', `folder.${folderId}`)));
       if (!folder || folder.deleted || !folder.data || !('type' in folder.data) || folder.data.type !== 'folder') throw new Error('Dossier introuvable.');
@@ -446,7 +452,8 @@ export async function pendingMutations(scope: string): Promise<PendingMutation[]
 }
 export async function markMutationSent(mutation: PendingMutation): Promise<boolean> {
   const connection = await db();
-  return transaction(connection, ['outbox'], 'readwrite', async (tx) => {
+  return transaction(connection, ['outbox', 'meta'], 'readwrite', async (tx) => {
+    await assertAccountPresent(tx, mutation.scope);
     const store = tx.objectStore('outbox');
     const current = await requestValue<PendingMutation | undefined>(store.get(key(mutation.scope, mutation.kind, mutation.id)));
     if (!current || current.mutationId !== mutation.mutationId) return false;
@@ -456,7 +463,8 @@ export async function markMutationSent(mutation: PendingMutation): Promise<boole
 }
 export async function releaseRejectedMutation(mutation: PendingMutation) {
   const connection = await db();
-  await transaction(connection, ['resources', 'outbox'], 'readwrite', async (tx) => {
+  await transaction(connection, ['resources', 'outbox', 'meta'], 'readwrite', async (tx) => {
+    await assertAccountPresent(tx, mutation.scope);
     const outbox = tx.objectStore('outbox');
     const recordKey = key(mutation.scope, mutation.kind, mutation.id);
     const queued = await requestValue<PendingMutation | undefined>(outbox.get(recordKey));
@@ -470,7 +478,8 @@ export async function releaseRejectedMutation(mutation: PendingMutation) {
 }
 export async function acceptMutation(scope: string, mutationId: string, status: 'applied' | 'conflict', remote: RemoteResource) {
   const connection = await db();
-  await transaction(connection, ['resources', 'outbox'], 'readwrite', async (tx) => {
+  await transaction(connection, ['resources', 'outbox', 'meta'], 'readwrite', async (tx) => {
+    await assertAccountPresent(tx, scope);
     const resources = tx.objectStore('resources'), outbox = tx.objectStore('outbox');
     const recordKey = key(scope, remote.kind, remote.id);
     const queued = await requestValue<PendingMutation | undefined>(outbox.get(recordKey));
@@ -496,6 +505,7 @@ export async function acceptMutation(scope: string, mutationId: string, status: 
 export async function applyRemoteChanges(scope: string, remote: RemoteResource[], cursor: number) {
   const connection = await db();
   await transaction(connection, ['resources', 'outbox', 'meta'], 'readwrite', async (tx) => {
+    await assertAccountPresent(tx, scope);
     const resources = tx.objectStore('resources'), outbox = tx.objectStore('outbox');
     for (const incoming of remote) {
       const recordKey = key(scope, incoming.kind, incoming.id);
@@ -526,6 +536,7 @@ export async function syncConflicts(scope: string): Promise<LocalResource[]> {
 export async function resolveSyncConflict(scope: string, kind: ResourceKind, id: string, keepLocal: boolean) {
   const connection = await db();
   await transaction(connection, ['resources', 'outbox', 'meta'], 'readwrite', async (tx) => {
+    await assertAccountPresent(tx, scope);
     const resources = tx.objectStore('resources'), outbox = tx.objectStore('outbox');
     const recordKey = key(scope, kind, id);
     const record = await requestValue<LocalResource | undefined>(resources.get(recordKey));
@@ -545,6 +556,7 @@ export async function claimAnonymousLibrary(scope: string): Promise<number> {
   const connection = await db();
   let count = 0;
   await transaction(connection, ['resources', 'outbox', 'meta'], 'readwrite', async (tx) => {
+    await assertAccountPresent(tx, scope);
     const resources = tx.objectStore('resources'), outbox = tx.objectStore('outbox');
     const local = await requestValue<LocalResource[]>(resources.index('scope').getAll(ANONYMOUS_SCOPE));
     for (const source of local) {
@@ -569,4 +581,55 @@ export async function claimAnonymousLibrary(scope: string): Promise<number> {
   });
   if (count) changed(scope, 'write');
   return count;
+}
+
+async function assertAccountPresent(tx: IDBTransaction, scope: string) {
+  if (scope !== ANONYMOUS_SCOPE && await requestValue(tx.objectStore('meta').get(`account.deleted.${scope}`))) throw new Error('Ce compte a été supprimé.');
+}
+
+/** Forget this account on this browser; never move its files to anonymous. */
+export async function forgetAccountScope(scope: string): Promise<void> {
+  if (!scope.startsWith('user:')) throw new Error('Compte invalide.');
+  const connection = await db();
+  const scoreIds: string[] = [], takeIds: string[] = [];
+  await transaction(connection, ['resources', 'outbox', 'takeIndex', 'takeData', 'meta', 'scores', 'takes'], 'readwrite', async tx => {
+    const resources = tx.objectStore('resources');
+    const records = await requestValue<LocalResource[]>(resources.index('scope').getAll(scope));
+    for (const record of records) {
+      resources.delete(key(scope, record.kind, record.id));
+      if (record.kind === 'score') { scoreIds.push(record.id); tx.objectStore('scores').delete(record.id); }
+    }
+    const outbox = tx.objectStore('outbox');
+    for (const recordKey of await requestValue(outbox.index('scope').getAllKeys(scope))) outbox.delete(recordKey);
+    const takes = tx.objectStore('takeIndex');
+    for (const take of await requestValue<TakeIndex[]>(takes.index('scope').getAll(scope))) {
+      takeIds.push(take.id); takes.delete([scope, take.id]);
+      tx.objectStore('takeData').delete([scope, take.id]); tx.objectStore('takes').delete(take.id);
+    }
+    const meta = tx.objectStore('meta');
+    meta.put(true, `account.deleted.${scope}`);
+    for (const name of await requestValue(meta.getAllKeys())) {
+      if (typeof name === 'string' && (name === `sync.cursor.${scope}` || name.startsWith(`sync.backup.${scope}.`))) meta.delete(name);
+    }
+  });
+  // Discard matching recovery copies made by the application's previous name.
+  const legacy = await new Promise<IDBDatabase | null>((resolve, reject) => {
+    let absent = false;
+    const request = indexedDB.open(LEGACY_NAME);
+    request.onupgradeneeded = () => { absent = true; request.transaction!.abort(); };
+    request.onerror = () => absent ? resolve(null) : reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+  });
+  if (legacy) {
+    try {
+      const names = ['scores', 'takes'].filter(name => legacy.objectStoreNames.contains(name));
+      if (names.length) await transaction(legacy, names, 'readwrite', async tx => {
+        if (names.includes('scores')) scoreIds.forEach(id => tx.objectStore('scores').delete(id));
+        if (names.includes('takes')) takeIds.forEach(id => tx.objectStore('takes').delete(id));
+      });
+    } finally { legacy.close(); }
+  }
+  try { for (const id of scoreIds) { localStorage.removeItem(`chansonade.practice.${id}`); localStorage.removeItem(`${LEGACY_NAME}.practice.${id}`); } }
+  catch { /* Account data in IndexedDB is already removed. */ }
+  changed(scope, 'remote');
 }

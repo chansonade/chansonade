@@ -1,5 +1,6 @@
 import createVerovioModule from 'verovio/wasm';
 import { VerovioToolkit } from 'verovio/esm';
+import { checkScoreXML } from './score-import';
 
 const ready = createVerovioModule().then((module: any) => new VerovioToolkit(module));
 let queue = Promise.resolve();
@@ -28,6 +29,7 @@ self.onmessage = ({ data }) => {
 
       let musical;
       if (data.type === 'load') {
+        checkScoreXML(data.xml);
         if (!toolkit.loadData(data.xml)) throw new Error('Cette partition ne peut pas être lue. Essayez un fichier MusicXML ou MXL.');
         const timemap = toolkit.renderToTimemap({ includeMeasures: true, includeRests: true });
         const notes: Record<string, { pitch: number; time: number; duration: number; writtenId: string }> = {};

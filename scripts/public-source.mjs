@@ -7,9 +7,9 @@ const paths = [
   '.editorconfig', '.gitignore', 'AGENTS.md', 'LICENSE', 'README.md',
   'CONTRIBUTING.md', 'THIRD_PARTY.md', 'package.json', 'package-lock.json',
   'index.html', 'tsconfig.json', 'vite.config.ts', 'svelte.config.js',
-  'src', 'public', 'scripts', 'docs',
+  'src', 'public', 'scripts', 'docs', '.github',
 ];
-const permittedHidden = new Set(paths.filter((name) => name.startsWith('.')));
+const permittedHidden = new Set([...paths.filter((name) => name.startsWith('.')), '.github/workflows', '.github/workflows/check.yml']);
 
 export async function copyPublicSource(root, destination) {
   const catalog = JSON.parse(await readFile(path.join(root, 'public/scores/catalog.json'), 'utf8'));

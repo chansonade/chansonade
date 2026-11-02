@@ -5,8 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "build": "svelte-check --tsconfig ./tsconfig.json && vite build && node scripts/build-catalog-pages.mjs && node scripts/build-source.mjs && node scripts/build-offline.mjs",
-    "preview": "vite preview --host 0.0.0.0"
+    "build": "svelte-check --tsconfig ./tsconfig.json && vite build && node scripts/build-source.mjs && node scripts/build-offline.mjs",
+    "preview": "vite preview --host 0.0.0.0",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "node scripts/check-client.mjs",
+    "test:browser": "node scripts/check-client.mjs --browser"
   },
   "dependencies": {
     "@lucide/svelte": "^1.66.0",

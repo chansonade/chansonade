@@ -1,6 +1,6 @@
 import { writable } from 'svelte/store';
 import { synchronizeTakes, TakeAPIError } from './take-sync';
-import { takeSyncEntries, ANONYMOUS_SCOPE, storageScope, setStorageScope, subscribeStorage, pendingMutations, markMutationSent, releaseRejectedMutation, acceptMutation, applyRemoteChanges, syncCursor, syncConflicts, resolveSyncConflict, claimAnonymousLibrary, type LocalResource, type RemoteResource } from './storage';
+import { forgetAccountScope, takeSyncEntries, ANONYMOUS_SCOPE, storageScope, setStorageScope, subscribeStorage, pendingMutations, markMutationSent, releaseRejectedMutation, acceptMutation, applyRemoteChanges, syncCursor, syncConflicts, resolveSyncConflict, claimAnonymousLibrary, type LocalResource, type RemoteResource } from './storage';
 
 type User = { id: string; email: string };
 type Session = { user: User | null; registration: 'invite' | 'open' };
@@ -198,3 +198,26 @@ async function changeAuthentication(route: string, method: string, data?: unknow
 export function login(email: string, password: string) { return changeAuthentication('session', 'POST', { email, password }); }
 export function createAccount(email: string, password: string, invitation?: string) { return changeAuthentication('accounts', 'POST', { email, password, ...(invitation ? { invitation } : {}) }); }
 export function logout() { return changeAuthentication('session', 'DELETE'); }
+
+/** Operator-issued, short-lived recovery link; it never signs another account in. */
+export async function resetPassword(token: string, password: string) {
+  await changeAuthentication('password-reset', 'POST', {token, password});
+}
+export async function deleteAccount(password: string, onDeleted: (scope: string) => void = () => {}) {
+  const account = user;
+  if (!account) throw new Error('Connexion nécessaire.');
+  const scope = `user:${account.id}`;
+  authChanging = true; epoch++; controller?.abort(); clearTimeout(timer);
+  let deleted = false;
+  try {
+    await request('account', {method:'DELETE', body:JSON.stringify({password})}, account);
+    deleted = true;
+    onDeleted(scope);
+    try { await forgetAccountScope(scope); }
+    catch { throw new Error('Compte supprimé du serveur. Effacez les données du site pour supprimer les copies locales restantes.'); }
+  } finally {
+    if (deleted) adoptSession({user:null, registration:state.registration});
+    authChanging = false;
+  }
+  await synchronize();
+}

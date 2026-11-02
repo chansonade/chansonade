@@ -1,6 +1,7 @@
-import { unzipSync, strFromU8 } from 'fflate';
 import { alignNoteTimings } from './loop';
 import { publicCatalog } from './catalog';
+import { checkScoreXML } from './score-import';
+export { readMusicXML } from './score-import';
 
 export type ViewMode = 'vertical' | 'horizontal';
 export type Part = {
@@ -64,22 +65,8 @@ export const examples = [
   ] : []),
 ];
 
-export function readMusicXML(bytes: ArrayBuffer): string {
-  const array = new Uint8Array(bytes);
-  if (array[0] !== 0x50 || array[1] !== 0x4b) return new TextDecoder().decode(array);
-  const files = unzipSync(array);
-  const container = files['META-INF/container.xml'];
-  let path = '';
-  if (container) {
-    const doc = new DOMParser().parseFromString(strFromU8(container), 'application/xml');
-    path = doc.getElementsByTagNameNS('*', 'rootfile')[0]?.getAttribute('full-path') || '';
-  }
-  path ||= Object.keys(files).find((name) => !name.startsWith('META-INF/') && /\.(musicxml|xml)$/i.test(name)) || '';
-  if (!files[path]) throw new Error('Le fichier MXL ne contient pas de partition MusicXML.');
-  return strFromU8(files[path]);
-}
-
 export function metadata(xml: string, filename: string) {
+  checkScoreXML(xml);
   const doc = new DOMParser().parseFromString(xml, 'application/xml');
   if (doc.querySelector('parsererror')) throw new Error('Le fichier XML est invalide.');
   if (!['score-partwise', 'score-timewise'].includes(doc.documentElement.localName)) throw new Error('Ce fichier ne contient pas de partition MusicXML.');
@@ -90,33 +77,72 @@ export function metadata(xml: string, filename: string) {
 }
 
 export class Score {
-  private worker = new Worker(new URL('./score-worker.ts', import.meta.url), { type: 'module' });
+  private worker: Worker | null = null;
+  private closed = false;
+  private loaded = false;
   private nextId = 0;
-  private waiting = new Map<number, { resolve: (result: ScoreResult) => void; reject: (error: Error) => void }>();
+  private waiting = new Map<number, { resolve: (result: ScoreResult) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; load: boolean }>();
 
-  constructor() {
-    this.worker.onmessage = ({ data }) => {
+  private openWorker(): Worker {
+    const worker = new Worker(new URL('./score-worker.ts', import.meta.url), { type: 'module' });
+    this.worker = worker;
+    worker.onmessage = ({ data }) => {
+      if (worker !== this.worker) return;
       const pending = this.waiting.get(data.id);
       if (!pending) return;
+      if (data.error) { this.resetWorker(new Error(data.error), worker); return; }
+      clearTimeout(pending.timer);
       this.waiting.delete(data.id);
-      if (data.error) pending.reject(new Error(data.error));
-      else pending.resolve({ pages: data.pages, musical: data.musical && this.convertMusic(data.musical) });
+      try {
+        const result = { pages: data.pages, musical: data.musical && this.convertMusic(data.musical) };
+        if (pending.load) this.loaded = true;
+        pending.resolve(result);
+      }
+      catch (error) { pending.reject(error instanceof Error ? error : new Error(String(error))); this.resetWorker(new Error('Le moteur de partition ne répond pas.'), worker); }
     };
-    this.worker.onerror = (event) => {
-      for (const pending of this.waiting.values()) pending.reject(new Error(event.message || 'Le moteur de partition ne répond pas.'));
-      this.waiting.clear();
-    };
+    worker.onerror = () => this.resetWorker(new Error('Le moteur de partition ne répond pas.'), worker);
+    worker.onmessageerror = () => this.resetWorker(new Error('Le moteur de partition ne répond pas.'), worker);
+    return worker;
   }
 
-  load(xml: string, mode: ViewMode, width: number, zoom: number) { return this.request({ type: 'load', xml, mode, width, zoom }); }
-  layout(mode: ViewMode, width: number, zoom: number) { return this.request({ type: 'layout', mode, width, zoom }); }
-  destroy() { this.worker.terminate(); for (const pending of this.waiting.values()) pending.reject(new Error('Lecteur fermé.')); this.waiting.clear(); }
+  private resetWorker(error: Error, worker = this.worker) {
+    if (worker !== this.worker) return;
+    this.worker?.terminate();
+    this.worker = null;
+    this.loaded = false;
+    for (const pending of this.waiting.values()) { clearTimeout(pending.timer); pending.reject(error); }
+    this.waiting.clear();
+  }
 
-  private request(payload: object): Promise<ScoreResult> {
+  load(xml: string, mode: ViewMode, width: number, zoom: number) {
+    try { checkScoreXML(xml); } catch (error) { return Promise.reject(error); }
+    if (this.waiting.size) this.resetWorker(new Error('La partition a changé. Relancez la lecture.'));
+    this.loaded = false;
+    return this.request({ type: 'load', xml, mode, width, zoom });
+  }
+  layout(mode: ViewMode, width: number, zoom: number) {
+    if (this.closed) return Promise.reject(new Error('Lecteur fermé.'));
+    if (!this.loaded) return Promise.reject(new Error('Rouvrez la partition pour modifier sa mise en page.'));
+    return this.request({ type: 'layout', mode, width, zoom });
+  }
+  destroy() {
+    this.closed = true;
+    this.resetWorker(new Error('Lecteur fermé.'));
+  }
+
+  private request(payload: { type: 'load' | 'layout'; xml?: string; mode: ViewMode; width: number; zoom: number }): Promise<ScoreResult> {
+    if (this.closed) return Promise.reject(new Error('Lecteur fermé.'));
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
-      this.waiting.set(id, { resolve, reject });
-      this.worker.postMessage({ ...payload, id });
+      let worker: Worker;
+      try { worker = this.worker || this.openWorker(); }
+      catch { reject(new Error('Le moteur de partition ne répond pas.')); return; }
+      const timer = setTimeout(() => {
+        if (this.waiting.has(id)) this.resetWorker(new Error('Le moteur de partition a pris trop de temps.'), worker);
+      }, 30_000);
+      this.waiting.set(id, { resolve, reject, timer, load: payload.type === 'load' });
+      try { worker.postMessage({ ...payload, id }); }
+      catch { this.resetWorker(new Error('Le moteur de partition ne répond pas.'), worker); }
     });
   }
 

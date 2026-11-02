@@ -94,8 +94,10 @@ immuables ; déplacer un essai ne les retransfère pas. Les dossiers publics son
 un catalogue en lecture seule, distinct des données privées. Les ajouts publics
 emploient le SHA-256 du XML, identique aux imports privés, sans relancer le lecteur.
 
-`scripts/build-catalog-pages.mjs` génère les pages publiques sans JavaScript sous
-`catalogue/`. Leurs liens `?score=<id>` ouvrent directement l'édition dans le client.
+Le projet indépendant `chansonade-site` génère les pages publiques sans JavaScript.
+Il ne lit que le manifeste et les assets publics comme entrées de build ; aucun
+module interne du client ou du serveur n’est importé. `VITE_CATALOGUE_URL` rend
+son lien optionnel dans le client. Les liens `?score=<id>` ouvrent l’édition choisie.
 La configuration nginx autorise l'indexation de ces pages publiques et conserve
 les restrictions du client et de l'API ; elle ne publie aucun dossier personnel.
 
@@ -126,3 +128,26 @@ et les autres onglets via l’événement storage. Cette préférence appartient
 l’appareil et ne fait pas partie des réglages synchronisés. Les notes du piano et
 les dates suivent la langue ; titres, paroles et noms utilisateur ne sont pas traduits.
 La traduction ne participe pas aux dépendances de gravure ni au cycle audio.
+
+## Protections et régressions
+
+`score-import.ts` borne l’archive avant extraction et la taille réellement décompressée,
+sans extraire ses fichiers annexes. `Score` réinitialise le Worker en cas de panne
+ou après 30 secondes ; une nouvelle ouverture peut le recréer. Une mise en page
+sans document chargé est refusée afin de conserver les pages précédentes.
+
+Le Worklet borne la capture au nombre exact d’échantillons : 10 minutes ou moins
+de 64 Mio en PCM16. `take-session.ts` construit et sauvegarde les prises ; son
+budget UTF-8 arrête aussi la prise avant 11 Mio de métadonnées, pour rester sous
+la limite API de 12 Mio. La courbe acoustique n’est ni corrigée ni tronquée après
+coup. Une interruption conserve les chunks déjà reçus ; la confirmation du
+Worklet et la fin d’analyse ont des délais séparés. Le navigateur est averti avant
+une navigation risquant de perdre une prise, sans garantie de sauvegarde à la fermeture.
+
+Les comptes supprimés portent un marqueur local transactionnel : les anciennes
+réponses réseau et écritures de ce compte sont refusées, y compris une adoption
+retardée de données anonymes. Les autres comptes restent indépendants.
+
+La CI exécute `check`, le parcours synthétique `test:browser` et le build. Les
+scénarios portent sur import/limites, moteur, boucle, WAV/réécoute, comptes et
+reprise réseau. Les essais physiques Android/iOS restent à effectuer.

@@ -31,7 +31,7 @@ npm run dev
 
 Open <http://localhost:5178>. The client works without the synchronization server.
 
-Import a `.musicxml`, `.xml` or `.mxl` file, or use the included **Une souris verte** arrangement for voice and piano. An optional private corpus in `local-scores/` is available only during development. It is ignored by Git and excluded from public exports; a fresh clone needs no such directory.
+Import a UTF-8 `.musicxml`, `.xml` or `.mxl` file (5 MiB of XML, 10 MiB per MXL archive and at most 256 archive entries), or use the included **Une souris verte** arrangement for voice and piano. An optional private corpus in `local-scores/` is available only during development. It is ignored by Git and excluded from public exports; a fresh clone needs no such directory.
 
 ### A simple singing exercise
 
@@ -73,13 +73,15 @@ The piano has its own instrument on the same AudioContext and can be played duri
 
 ## Public catalogue and folders
 
-The **“Library”** drawer separates **“Public catalogue”** from **“My scores”**. Public pieces can be played without an account and added to the personal library without duplicates or restarting playback. Source and license information remains available for each edition. Shareable catalogue pages are generated under `catalogue/`; their practice links open the selected piece directly.
+The **“Library”** drawer separates **“Public catalogue”** from **“My scores”**. Public pieces can be played without an account and added to the personal library without duplicates or restarting playback. Source and license information remains available for each edition. Shareable catalogue pages belong to the separate `chansonade-site` project. Set `VITE_CATALOGUE_URL` to show its optional link; the client remains usable on its own. Catalogue practice links open the selected piece directly.
 
 Personal folders have one level. Create, rename and delete them from the folder controls, then use an item's folder selector to move it. Removing a folder keeps its scores and takes under **“Unfiled”**. Folders and placements synchronize automatically when signed in. Public catalogue folders are maintained by the project; personal scores and recordings are private.
 
 ## Record a take
 
 Select **“Record a take”**. The microphone starts, a three-second count-in prepares the entrance, then playback begins at the selected position. Score following is enabled automatically.
+
+A take stops and saves automatically at 10 minutes, before its PCM16 WAV reaches 64 MiB, or when its analysis metadata reaches the upload budget. High sample rates or a large score can shorten that limit. An interrupted microphone preserves the audio already received and marks the analysis incomplete. Closing a browser tab cannot guarantee an asynchronous save; wait until saving finishes.
 
 Select **“Stop take”** to stop, including from the floating landscape control. Reaching the end of the score also stops recording. Wait for saving to finish before reloading or closing the page.
 
@@ -105,6 +107,8 @@ Imported scores, per-score settings and pending synchronization changes are stor
 
 Signing in automatically synchronizes takes, scores and practice settings. Unassigned local scores, settings and takes move automatically into the signed-in account. Data already assigned to another account stays separate; no manual import or synchronization action is needed. Microphone selection, microphone timing adjustment and display preferences stay on the device. Transfers pause during recording and resume afterward.
 
+Accounts currently use invitations. For a forgotten password, ask the person who invited you for a one-hour, single-use recovery link. Resetting a password revokes the account's sessions. The account panel also allows permanent account deletion after entering the current password and confirming. This removes server data and this browser's account data; other devices may retain local copies, and backups have a separate retention policy.
+
 The synchronization service is a **separate private project**. The client uses a same-origin API under `api/v1/`, relative to its deployment path; take metadata is JSON and WAV audio is transferred as binary. Takes are limited to 64 MiB each and 512 MiB total per account (including metadata), with at most 1,000 active takes. An interrupted transfer is retried; it remains stored locally if the limit or network prevents synchronization. Server revisions detect conflicts; mutation IDs support retries; deletion markers prevent an older device from silently restoring deleted data. Pending local edits are retried automatically against the latest server revision; the concurrent version is backed up locally.
 
 Existing data from the app's previous name is migrated on the same origin without deleting the original copies or overwriting newer Chansonade records. Browser data belongs to an origin: moving to a different domain requires account synchronization or export/import.
@@ -127,6 +131,7 @@ The build also creates a matching source bundle and third-party notices in `dist
 ```sh
 CHANSONADE_BASE_PATH=/projects/chansonade/ \
 VITE_REPOSITORY_URL=https://github.com/chansonade/chansonade \
+VITE_CATALOGUE_URL=https://nafis.io/projects/chansonade/catalogue/ \
 npm run build
 ```
 
@@ -150,6 +155,19 @@ Current limitations include:
 - A–B loop boundaries are monitored by the animation loop; restart timing can vary by a frame in the foreground and is not guaranteed in background tabs.
 - Complex MusicXML repeats and uncommon notation depend on Verovio and need checking on the relevant files.
 - Browser viewport emulation checks layout, not audio behavior on real phones or Safari.
+
+## Checks
+
+```sh
+npm run check
+npx playwright install chromium
+npm run test:browser
+npm run build
+```
+
+The browser checks start a temporary local Vite server and headless Chromium with an isolated context and synthetic microphone. They cover bounded imports, engine recovery, loop selection, recording/replay, account isolation and retrying synchronization. `npm test` runs the smaller regression set; CI runs the complete browser set once. An existing test endpoint can be supplied with `CHANSONADE_TEST_CDP` and `CHANSONADE_TEST_URL`.
+
+Actual mobile audio behavior still needs testing on physical devices: microphone permission/refusal, lock screen, app switching, disconnection and rotation during a take. Viewport emulation does not validate those device behaviors.
 
 ## Contributing and licensing
 

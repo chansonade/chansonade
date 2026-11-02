@@ -1,5 +1,6 @@
 import { microphoneWav } from './wav';
 import { PITCH_CONFIG } from './pitch-config';
+import { recordingMaxSamples } from './recording-limits';
 
 export interface PitchResult {
   frequency: number;
@@ -32,6 +33,8 @@ export interface MicrophoneRecording extends RecordingStart {
   analysisComplete: boolean;
 }
 
+export type RecordingEndReason = 'limit' | 'interrupted';
+
 type RecordingWaiter<T> = {
   resolve: (value: T) => void;
   reject: (error: Error) => void;
@@ -41,7 +44,7 @@ type CaptureMessage =
   | { type?: 'pitch'; samples: Float32Array; time: number }
   | ({ type: 'recording-started'; id: number } & RecordingStart)
   | { type: 'recording-chunk'; id: number; samples: Float32Array }
-  | ({ type: 'recording-stopped'; id: number; duration: number; samples: number } & RecordingStart);
+  | ({ type: 'recording-stopped'; id: number; duration: number; samples: number; reason?: 'manual' | 'limit' } & RecordingStart);
 
 /** Fractional MIDI pitch; use Math.round() for the nearest note. */
 export function frequencyToMidi(frequency: number): number {
@@ -64,7 +67,11 @@ export class PitchInput {
   private running = false;
   private starting: Promise<void> | null = null;
   private recordingId = 0;
-  private recordingData: { id: number; chunks: Float32Array[]; startedAt: number; sampleRate: number } | null = null;
+  private recordingData: { id: number; chunks: Float32Array[]; startedAt: number; sampleRate: number; interrupted: boolean } | null = null;
+  private recordingCompletion: Promise<MicrophoneRecording> | null = null;
+  private interruptionTimer: ReturnType<typeof setTimeout> | null = null;
+  private interrupted = false;
+  private workerFailed = false;
   private recordingStart: Promise<RecordingStart> | null = null;
   private recordingStop: Promise<MicrophoneRecording> | null = null;
   private startWaiter: RecordingWaiter<RecordingStart> | null = null;
@@ -72,7 +79,7 @@ export class PitchInput {
   private flushId = 0;
   private flushWaiters = new Map<number, RecordingWaiter<void>>();
 
-  constructor(private readonly callback: (result: PitchResult) => void, private readonly previewCallback: (results: PitchResult[]) => void = () => {}) {}
+  constructor(private readonly callback: (result: PitchResult) => void, private readonly previewCallback: (results: PitchResult[]) => void = () => {}, private readonly onRecordingEnd: (reason: RecordingEndReason) => void = () => {}) {}
 
   get active(): boolean {
     return this.running;
@@ -100,7 +107,9 @@ export class PitchInput {
     if (revision !== this.revision || !this.capture || !this.context) throw new Error('Le micro a été arrêté.');
     if (this.recordingStart) return this.recordingStart;
     const id = ++this.recordingId;
-    this.recordingData = { id, chunks: [], startedAt: -1, sampleRate: this.context.sampleRate };
+    this.interrupted = false;
+    this.recordingCompletion = null;
+    this.recordingData = { id, chunks: [], startedAt: -1, sampleRate: this.context.sampleRate, interrupted: false };
     this.recordingStart = new Promise((resolve, reject) => {
       const timer = setTimeout(() => this.cancelRecording(new Error('Le démarrage de l’enregistrement a pris trop de temps.')), 5000);
       this.startWaiter = { resolve, reject, timer };
@@ -113,19 +122,58 @@ export class PitchInput {
     if (this.recordingStop) return this.recordingStop;
     if (!this.recordingStart || !this.recordingData) throw new Error('Aucun enregistrement en cours.');
     await this.recordingStart;
-    if (!this.recordingData || !this.capture) throw new Error('Le micro a été arrêté.');
     if (this.recordingStop) return this.recordingStop;
+    if (!this.recordingData) throw new Error('Le micro a été arrêté.');
+    if (this.recordingCompletion) return this.consumeRecording(this.recordingCompletion);
+    const recording = this.recordingData;
     this.recordingStop = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => this.cancelRecording(new Error('La fin de l’enregistrement a pris trop de temps.')), 5000);
+      const timer = setTimeout(() => this.completeRecording(recording, false), 5000);
       this.stopWaiter = { resolve, reject, timer };
     });
-    this.capture.port.postMessage({ type: 'recording-stop', id: this.recordingData.id });
-    return this.recordingStop;
+    if (this.capture && !this.interrupted) this.capture.port.postMessage({ type: 'recording-stop', id: recording.id });
+    else if (this.capture && this.context?.state === 'running') this.capture.port.postMessage({ type: 'recording-stop', id: recording.id });
+    else this.completeRecording(recording, false);
+    return this.recordingStop!;
+  }
+
+  private consumeRecording(completion: Promise<MicrophoneRecording>): Promise<MicrophoneRecording> {
+    if (this.recordingStop) return this.recordingStop;
+    const pending = completion.finally(() => {
+      if (this.recordingStop === pending) {
+        this.recordingData = null; this.recordingStart = null;
+        this.recordingCompletion = null; this.recordingStop = null;
+      }
+    });
+    this.recordingStop = pending;
+    return pending;
+  }
+
+  private completeRecording(recording: NonNullable<PitchInput['recordingData']>, complete: boolean) {
+    if (this.recordingData !== recording || this.recordingCompletion) return;
+    if (this.interruptionTimer) { clearTimeout(this.interruptionTimer); this.interruptionTimer = null; }
+    // The worklet acknowledged the audio; the decoder gets its own timeout.
+    if (this.stopWaiter) clearTimeout(this.stopWaiter.timer);
+    const samples = recording.chunks.reduce((total, chunk) => total + chunk.length, 0);
+    this.recordingCompletion = (complete && !recording.interrupted && !this.workerFailed ? this.flushPitch().then(() => true, () => false) : Promise.resolve(false)).then(analysisComplete => ({
+      audio: microphoneWav(recording.chunks, recording.sampleRate), sampleRate: recording.sampleRate,
+      startedAt: recording.startedAt, duration: samples / recording.sampleRate, samples, analysisComplete,
+    }));
+    if (this.stopWaiter) {
+      const waiter = this.stopWaiter;
+      this.stopWaiter = null;
+      void this.recordingCompletion.then(value => {
+        waiter.resolve(value);
+        if (this.recordingData === recording) {
+          this.recordingData = null; this.recordingStart = null;
+          this.recordingCompletion = null; this.recordingStop = null;
+        }
+      }, error => { waiter.reject(error instanceof Error ? error : new Error(String(error))); });
+    }
   }
 
   private handleRecording(data: Exclude<CaptureMessage, { type?: 'pitch' }>) {
     const recording = this.recordingData;
-    if (!recording || data.id !== recording.id) return;
+    if (!recording || data.id !== recording.id || this.recordingCompletion) return;
     if (data.type === 'recording-chunk') {
       recording.chunks.push(data.samples);
     } else if (data.type === 'recording-started') {
@@ -138,28 +186,30 @@ export class PitchInput {
       }
     } else {
       const samples = recording.chunks.reduce((total, chunk) => total + chunk.length, 0);
-      if (samples !== data.samples) {
-        this.cancelRecording(new Error('L’enregistrement audio est incomplet.'));
-        return;
-      }
-      // Resolve only after the temporal decoder has emitted its pending tail.
-      // Its callbacks must reach App before the take's metadata is frozen.
-      const finish = (analysisComplete: boolean) => {
-        if (this.recordingData !== recording || !this.stopWaiter) return;
-        clearTimeout(this.stopWaiter.timer);
-        this.stopWaiter.resolve({ audio: microphoneWav(recording.chunks, recording.sampleRate), sampleRate: recording.sampleRate, startedAt: recording.startedAt, duration: samples / recording.sampleRate, samples, analysisComplete });
-        this.stopWaiter = null;
-        this.recordingData = null;
-        this.recordingStart = null;
-        this.recordingStop = null;
-      };
-      // A decoder failure must never discard an already complete recording.
-      void this.flushPitch().then(() => finish(true), () => finish(false));
+      this.completeRecording(recording, samples === data.samples);
+      if (data.reason === 'limit') this.onRecordingEnd('limit');
     }
   }
 
+  private interruptCapture(canFlush: boolean) {
+    if (this.interrupted) return;
+    this.interrupted = true;
+    this.running = false;
+    const recording = this.recordingData;
+    if (recording) {
+      recording.interrupted = true;
+      if (recording.startedAt < 0) {
+        this.cancelRecording(new Error('Le microphone a été interrompu avant le début de l’enregistrement.'));
+      } else if (canFlush && this.capture && this.context?.state === 'running') {
+        this.capture.port.postMessage({ type: 'recording-stop', id: recording.id });
+        this.interruptionTimer = setTimeout(() => this.completeRecording(recording, false), 1000);
+      } else this.completeRecording(recording, false);
+    }
+    this.onRecordingEnd('interrupted');
+  }
+
   private flushPitch(): Promise<void> {
-    if (!this.worker) return Promise.reject(new Error('Le décodeur de hauteur est arrêté.'));
+    if (!this.worker || this.workerFailed) return Promise.reject(new Error('Le décodeur de hauteur est arrêté.'));
     const id = ++this.flushId;
     const completion = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { this.flushWaiters.delete(id); reject(new Error('Le décodeur de hauteur ne répond pas.')); }, 4000);
@@ -176,6 +226,9 @@ export class PitchInput {
     }
     this.startWaiter = null;
     this.stopWaiter = null;
+    if (this.interruptionTimer) clearTimeout(this.interruptionTimer);
+    this.interruptionTimer = null;
+    this.recordingCompletion = null;
     this.recordingData = null;
     this.recordingStart = null;
     this.recordingStop = null;
@@ -183,6 +236,8 @@ export class PitchInput {
 
   async start(sharedAudioContext?: AudioContext, deviceId = ''): Promise<void> {
     if (this.running) return;
+    if (this.recordingData) throw new Error('L’enregistrement précédent est encore en cours de sauvegarde.');
+    if (this.interrupted) this.stop();
     if (this.starting) return this.starting;
     const revision = ++this.revision;
     const pending = this.connect(sharedAudioContext, revision, deviceId);
@@ -237,10 +292,22 @@ export class PitchInput {
         numberOfInputs: 2,
         numberOfOutputs: 1,
         outputChannelCount: [1],
-        processorOptions: { windowSize: Math.round(context.sampleRate * PITCH_CONFIG.windowMs / 1000), hopSize: Math.round(context.sampleRate / PITCH_CONFIG.hopHz) },
+        processorOptions: { maxRecordingSamples: recordingMaxSamples(context.sampleRate), windowSize: Math.round(context.sampleRate * PITCH_CONFIG.windowMs / 1000), hopSize: Math.round(context.sampleRate / PITCH_CONFIG.hopHz) },
       });
       this.worker = worker;
+      this.workerFailed = false;
+      this.interrupted = false;
       this.capture = capture;
+      capture.onprocessorerror = () => { if (revision === this.revision) this.interruptCapture(false); };
+      stream.getAudioTracks().forEach(track => track.addEventListener('ended', () => { if (revision === this.revision) this.interruptCapture(true); }, { once: true }));
+      context.addEventListener('statechange', () => { if (revision === this.revision && this.running && context.state !== 'running') this.interruptCapture(false); });
+      worker.onerror = worker.onmessageerror = () => {
+        if (revision !== this.revision || worker !== this.worker) return;
+        this.workerFailed = true;
+        for (const waiter of this.flushWaiters.values()) { clearTimeout(waiter.timer); waiter.reject(new Error('Le décodeur de hauteur est arrêté.')); }
+        this.flushWaiters.clear();
+        this.interruptCapture(true);
+      };
       this.source = context.createMediaStreamSource(stream);
       worker.onmessage = (event: MessageEvent<PitchFrame | { type: 'flushed'; id: number }>) => {
         if (revision !== this.revision || !this.running) return;
@@ -279,9 +346,15 @@ export class PitchInput {
   }
 
   stop(): void {
-    this.cancelRecording(new Error('Le micro a été arrêté avant la sauvegarde de l’enregistrement.'));
+    // Preserve all delivered audio even if the graph disappears during a save.
+    const recording = this.recordingData;
+    if (recording && recording.startedAt >= 0) {
+      recording.interrupted = true;
+      this.completeRecording(recording, false);
+    } else this.cancelRecording(new Error('Le micro a été arrêté avant la sauvegarde de l’enregistrement.'));
     ++this.revision;
     this.running = false;
+    this.interrupted = false;
     this.previewCallback([]);
     this.starting = null;
     this.source?.disconnect();

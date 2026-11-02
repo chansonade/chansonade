@@ -22,6 +22,9 @@ verte** ou un fichier dont vous pouvez partager les droits. Le corpus privé
 ## Vérifier une modification
 
 ```sh
+npm run check
+npx playwright install chromium
+npm run test:browser
 npm run build
 npm run preview
 ```

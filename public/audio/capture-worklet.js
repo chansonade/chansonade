@@ -1,12 +1,13 @@
 class PitchCapture extends AudioWorkletProcessor {
   constructor(options) {
     super();
-    const { windowSize = 4096, hopSize = Math.round(sampleRate / 35) } = options.processorOptions ?? {};
+    const { windowSize = 4096, hopSize = Math.round(sampleRate / 35), maxRecordingSamples = Math.min(Math.floor(sampleRate * 600), Math.floor((64 * 1024 * 1024 - 45) / 2)) } = options.processorOptions ?? {};
     this.buffer = new Float32Array(windowSize);
     this.position = 0;
     this.filled = 0;
     this.sinceWindow = 0;
     this.hopSize = hopSize;
+    this.maxRecordingSamples = Math.max(1, Math.floor(maxRecordingSamples));
     this.running = true;
     this.commands = [];
     this.recording = null;
@@ -27,6 +28,14 @@ class PitchCapture extends AudioWorkletProcessor {
     recording.position = 0;
   }
 
+  stopRecording(reason) {
+    this.flushRecording();
+    const recording = this.recording;
+    if (!recording) return;
+    this.port.postMessage({ type: 'recording-stopped', id: recording.id, startedAt: recording.frame / sampleRate, sampleRate, samples: recording.samples, duration: recording.samples / sampleRate, reason });
+    this.recording = null;
+  }
+
   process(inputs, outputs) {
     if (!this.running) return false;
     // Acknowledge at an audio-block boundary: the first recorded frame and the
@@ -36,10 +45,7 @@ class PitchCapture extends AudioWorkletProcessor {
         this.recording = { id: command.id, frame: currentFrame, samples: 0, buffer: new Float32Array(8192), position: 0 };
         this.port.postMessage({ type: 'recording-started', id: command.id, startedAt: currentFrame / sampleRate, sampleRate });
       } else if (command.type === 'recording-stop' && this.recording?.id === command.id) {
-        this.flushRecording();
-        const recording = this.recording;
-        this.port.postMessage({ type: 'recording-stopped', id: recording.id, startedAt: recording.frame / sampleRate, sampleRate, samples: recording.samples, duration: recording.samples / sampleRate });
-        this.recording = null;
+        this.stopRecording('manual');
       }
     }
     this.commands.length = 0;
@@ -58,6 +64,7 @@ class PitchCapture extends AudioWorkletProcessor {
         this.recording.buffer[this.recording.position++] = value;
         this.recording.samples++;
         if (this.recording.position === this.recording.buffer.length) this.flushRecording();
+        if (this.recording.samples >= this.maxRecordingSamples) this.stopRecording('limit');
       }
       if (hasInput) {
         let analyzed = 0;
