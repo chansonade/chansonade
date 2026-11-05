@@ -22,7 +22,7 @@ try {
     browser = await chromium.launch({ headless: true, args: [`--remote-debugging-port=${port}`, '--autoplay-policy=no-user-gesture-required'] });
     cdp = `http://127.0.0.1:${port}`;
   }
-  const checks = ['check-score-import.mjs', 'check-recording-limits.mjs', 'check-loop-ranges.mjs', 'check-take-playback.mjs'];
+  const checks = ['check-score-import.mjs', 'check-recording-limits.mjs', 'check-loop-ranges.mjs', 'check-take-playback.mjs', 'check-distribution.mjs'];
   if (process.argv.includes('--browser')) checks.push('check-browser.mjs');
   for (const check of checks) {
     console.log(`\n${check}`);

@@ -2,11 +2,20 @@ import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { createReadStream, existsSync } from 'node:fs';
 import path from 'node:path';
+import { copyPublicAssets } from './scripts/public-source.mjs';
 
 export default defineConfig({
   base: process.env.CHANSONADE_BASE_PATH || '/',
+  build: { copyPublicDir: false },
   define: { 'import.meta.env.VITE_LOCAL_SCORES': JSON.stringify(String(existsSync('local-scores/vecchia-zimarra-senti.mxl'))) },
   plugins: [svelte(), {
+    name: 'public-catalogue-assets',
+    apply: 'build',
+    async writeBundle(options) {
+      if (!options.dir) throw new Error('A build output directory is required.');
+      await copyPublicAssets(this.environment.config.publicDir, options.dir);
+    },
+  }, {
     // The historical corpus remains available locally, outside public builds.
     name: 'private-local-scores',
     configureServer(server) {
