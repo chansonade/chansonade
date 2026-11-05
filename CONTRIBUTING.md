@@ -74,5 +74,5 @@ Le code propre au client est sous GPL-3.0-only. Documenter la provenance et la
 licence de toute nouvelle dépendance ou ressource dans [THIRD_PARTY.md](THIRD_PARTY.md).
 Le logo possède un statut distinct décrit dans ce document. Le serveur privé est
 un projet indépendant ; ses fichiers ne doivent pas entrer dans le dépôt client.
-Pour préparer un dépôt public ou une distribution, suivre
-[la procédure de publication](docs/PUBLISHING.md).
+Le dépôt est public, historique compris : avant de commiter une ressource ou de
+préparer une distribution, suivre [les règles de publication](docs/PUBLISHING.md).

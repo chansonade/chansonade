@@ -1,35 +1,31 @@
-# Préparer un dépôt public
+# Publier le client
 
-Le dépôt de travail d’origine a un historique privé : il contient notamment d'anciennes
-partitions aux droits de redistribution non établis. Les retirer de la branche
-courante ne les retire pas des anciens commits. Ne pas pousser cet historique
-sur un hébergement public.
+Le dépôt public GitHub est l’unique dépôt du client : le développement s’y fait
+directement. Tout ce qui y est commité est public, historique compris. Une
+ressource retirée de la branche courante reste lisible dans les anciens commits ;
+vérifier donc chaque ajout avant de le commiter.
 
-Pour commencer un dépôt public indépendant, exporter les fichiers autorisés
-dans un **nouveau dossier** :
+Ne jamais commiter :
 
-```sh
-node scripts/export-public.mjs ../chansonade-public
-cd ../chansonade-public
-git init
-git add .
-git commit -m "Initial public client"
-```
+- le corpus privé de `local-scores/`, ni une partition dont la redistribution
+  n’est pas établie ; une édition publique doit figurer dans
+  `public/scores/catalog.json` avec ses droits et sa provenance ;
+- des prises, exports d’essais, enregistrements, captures ou copies d’analyse ;
+- des fichiers d’environnement, secrets, jetons ou données de compte ;
+- le serveur de synchronisation, qui reste un projet privé distinct.
 
-Le script refuse d'écraser un dossier existant. Il utilise la même liste de
-fichiers autorisés que l'offre source téléchargeable. Il exclut l'historique,
-le corpus local, les essais, les enregistrements, les fichiers d'environnement
-et le serveur privé. L'export peut être relu et compilé avant de lui ajouter
-un remote ; ce script ne publie rien et ne modifie pas le dépôt de travail.
+`.gitignore` exclut déjà `local-scores/`, `.env*`, `dist/` et les captures de
+validation `.browser*`. Il ne remplace pas la relecture de `git status` avant
+un commit.
 
 Le client est GPL-3.0-only. Les bibliothèques, polices, banque de sons et
-partition de démonstration conservent les licences indiquées dans
+partitions conservent les licences indiquées dans
 [THIRD_PARTY.md](../THIRD_PARTY.md). Le logo est une identité visuelle fournie
-séparément : sa réutilisation n'est pas autorisée par la GPL du code. Pour un
+séparément : sa réutilisation n’est pas autorisée par la GPL du code. Pour un
 fork avec une autre identité, remplacer `public/logo.png` et les références
-dans l'interface, le manifeste et `index.html`.
+dans l’interface, le manifeste et `index.html`.
 
 Le build produit aussi une offre source correspondant aux fichiers compilés,
 avec sources tierces versionnées et notices. Voir [SOURCES.md](SOURCES.md).
-La source téléchargée contient les archives tierces ; l'export Git propre
-contient leurs versions et empreintes pour les télécharger au premier build.
+La source téléchargée contient les archives tierces ; le dépôt contient leurs
+versions et empreintes pour les télécharger au premier build.

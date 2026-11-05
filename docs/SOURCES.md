@@ -139,8 +139,8 @@ pas une certification juridique des droits sur des contenus ajoutés plus tard.
 Toute nouvelle dépendance compilée nécessite de vérifier et d'actualiser son
 offre de sources et ses notices avant publication.
 
-## Export Git propre
+## Dépôt et lien source
 
-Le dépôt public peut être préparé sans l’historique privé avec `node scripts/export-public.mjs /chemin/neuf`. L’export et l’offre source partagent la même liste de fichiers autorisés. Voir [PUBLISHING.md](PUBLISHING.md).
+L’offre source suit la liste de fichiers autorisés de `scripts/public-source.mjs`, indépendamment de l’historique Git. Voir [PUBLISHING.md](PUBLISHING.md) pour ce qui ne doit jamais être commité.
 
 Le manifeste enregistre aussi `repositoryUrl` : définir `VITE_REPOSITORY_URL` à cette valeur pour reproduire le lien de dépôt de la version distribuée. Sans ce paramètre, le lien pointe sur l’archive source locale.

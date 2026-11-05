@@ -1,8 +1,8 @@
 import { cp, lstat, mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-// Shared by the downloadable source offer and a clean public repository export.
-// Never copy the workspace wholesale: its history and local corpus are private.
+// Allowlist for the downloadable source offer. Never copy the workspace
+// wholesale: the local corpus, takes and environment files are private.
 const paths = [
   '.editorconfig', '.gitignore', 'AGENTS.md', 'LICENSE', 'README.md',
   'CONTRIBUTING.md', 'THIRD_PARTY.md', 'package.json', 'package-lock.json',

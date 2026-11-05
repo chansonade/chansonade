@@ -175,4 +175,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [the module map](docs/ARCHITECTURE.md) a
 
 The original client code is licensed under **GPL-3.0-only**, copyright © 2026 Chansonade contributors. Libraries and assets retain their own licenses. The bundled TimGM6mb SoundFont is GPL version 2; public scores have their own licenses, including CC0 and CC BY-SA 4.0. The Chansonade and GitHub logos have separate terms and are not covered by the client's GPL. See [LICENSE](LICENSE), [THIRD_PARTY.md](THIRD_PARTY.md) and [public catalogue credits](docs/PUBLIC_CATALOG.md).
 
-The public repository was created from a clean export. The original private working history and local score corpus are not part of it. To prepare a new public snapshot from a private working tree, use `scripts/export-public.mjs` as described in the publication instructions.
+This public repository is the client's only repository; development happens here directly. It was started from a clean export, so earlier private history and the local score corpus are not part of it. See the publication instructions before committing new scores or assets.

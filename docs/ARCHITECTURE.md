@@ -111,8 +111,8 @@ Une mise à jour attend la fermeture des anciens onglets.
 Le code propre au client est GPL-3.0-only. Bibliothèques et ressources gardent leurs
 licences, dont le statut distinct du logo : voir [THIRD_PARTY.md](../THIRD_PARTY.md).
 Les [instructions de sources](SOURCES.md) expliquent la reconstruction et les
-archives tierces ; la [procédure de publication](PUBLISHING.md) décrit la préparation
-d'un dépôt public sans données privées ni corpus de travail.
+archives tierces ; les [règles de publication](PUBLISHING.md) indiquent ce qui ne doit
+jamais entrer dans le dépôt public.
 
 ## Langue de l’interface
 
