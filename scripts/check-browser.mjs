@@ -603,6 +603,197 @@ try {
   }, fixture);
   console.log('PASS browser: v5 queue migration preserves states, account boundaries and WAV bytes; remote-only failures share the outbox');
 
+  // Reserve openings at the user choice, before network, files, IDB or engines.
+  const openingContext = await isolatedContext();
+  await openingContext.route('**/api/v1/**', route => route.fulfill({ json: { user: null, registration: 'open' } }));
+  const syntheticXML = title => `<?xml version="1.0"?><score-partwise version="4.0"><work><work-title>${title}</work-title></work><part-list><score-part id="P1"><part-name>Piano</part-name><midi-instrument id="I1"><midi-channel>1</midi-channel><midi-program>1</midi-program></midi-instrument></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes><direction><sound tempo="120"/></direction><note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note></measure></part></score-partwise>`;
+  let heldCatalogue = null, catalogueRequests = 0;
+  await openingContext.route('**/scores/*', async route => {
+    if (new URL(route.request().url()).pathname.endsWith('catalog.json')) return route.continue();
+    catalogueRequests++;
+    if (heldCatalogue) { const hold = heldCatalogue; heldCatalogue = null; hold(route); return; }
+    return route.fulfill({ contentType: 'application/xml', body: syntheticXML('Synthetic catalogue') });
+  });
+  await openingContext.addInitScript(() => {
+    // Delay just the delivery of a real IndexedDB read; no database is mocked.
+    const getAll = IDBIndex.prototype.getAll;
+    const success = Object.getOwnPropertyDescriptor(IDBRequest.prototype, 'onsuccess');
+    window.__holdLibrary = true;
+    IDBIndex.prototype.getAll = function(...args) {
+      const request = getAll.apply(this, args);
+      if (this.name === 'scopeKind' && args[0]?.[1] === 'score' && window.__holdLibrary) {
+        window.__holdLibrary = false;
+        Object.defineProperty(request, 'onsuccess', { set(callback) {
+          success.set.call(request, event => { window.__releaseLibrary = () => callback.call(request, event); });
+        } });
+      }
+      return request;
+    };
+  });
+  const openingPage = await openingContext.newPage(); await openingPage.goto(url);
+  await openingPage.waitForFunction(() => !!window.__releaseLibrary);
+  await openingPage.evaluate(async () => {
+    const { Score } = await import('/src/lib/score.ts');
+    const { AudioPlayer } = await import('/src/lib/audio.ts');
+    window.__openingLoads = [];
+    const load = Score.prototype.load;
+    Score.prototype.load = async function(xml, ...args) {
+      window.__openingLoads.push(xml);
+      const result = await load.call(this, xml, ...args);
+      if (xml.includes(window.__holdEngineTitle || '\u0000')) {
+        window.__holdEngineTitle = null;
+        await new Promise((resolve, reject) => { window.__releaseEngine = error => error ? reject(Error(error)) : resolve(); });
+      }
+      return result;
+    };
+    const audioLoad = AudioPlayer.prototype.load;
+    AudioPlayer.prototype.load = async function(...args) {
+      await audioLoad.apply(this, args);
+      if (window.__holdAudio) {
+        window.__holdAudio = false;
+        await new Promise((resolve, reject) => { window.__releaseAudio = error => error ? reject(Error(error)) : resolve(); });
+      }
+    };
+    const read = File.prototype.arrayBuffer;
+    File.prototype.arrayBuffer = async function() {
+      const result = await read.call(this);
+      if (this.name === window.__holdFile) {
+        window.__holdFile = null;
+        await new Promise((resolve, reject) => { window.__releaseFile = error => error ? reject(Error(error)) : resolve(); });
+      }
+      return result;
+    };
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    crypto.subtle.digest = async (algorithm, data) => {
+      const result = await digest(algorithm, data);
+      if (window.__holdDigestTitle && new TextDecoder().decode(data).includes(window.__holdDigestTitle)) {
+        window.__holdDigestTitle = null;
+        await new Promise(resolve => { window.__releaseDigest = resolve; });
+      }
+      return result;
+    };
+  });
+  const importOpening = (title, name = `${title}.musicxml`) => openingPage.locator('input[type="file"]').setInputFiles({ name, mimeType: 'application/xml', buffer: Buffer.from(syntheticXML(title)) });
+  const settledOpening = async title => {
+    await openingPage.waitForFunction(title => document.querySelector('h1')?.textContent === title && document.querySelector('.transport .play-button')?.disabled === false && !document.querySelector('.loading-overlay'), title);
+    await openingPage.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await openingPage.locator('h1').innerText(), title);
+    assert.equal(await openingPage.locator('.loading-overlay, .error-card').count(), 0);
+    assert.equal(await openingPage.locator('.sheet-page > svg').first().getAttribute('aria-label'), title);
+  };
+  const releaseOpening = name => openingPage.evaluate(name => { window[name](); delete window[name]; }, name);
+  await importOpening('Startup winner'); await settledOpening('Startup winner');
+  await releaseOpening('__releaseLibrary'); await openingPage.waitForLoadState('networkidle'); await settledOpening('Startup winner');
+  assert.equal(catalogueRequests, 0, 'The superseded initial library lookup must not fetch its fallback');
+  await openingPage.getByRole('button', { name: 'Bibliothèque', exact: true }).click();
+  await openingPage.getByRole('button', { name: 'Mes partitions', exact: true }).click();
+  assert.equal(await openingPage.locator('.saved-piece strong').filter({ hasText: 'Startup winner' }).count(), 1, 'An old library read must not erase the newly imported score from the list');
+  await openingPage.locator('.library-panel').getByRole('button', { name: 'Fermer la bibliothèque', exact: true }).click();
+  const catalogue = await openingPage.evaluate(async () => (await import('/src/lib/catalog.ts')).publicCatalog.filter(piece => piece.group === 'children-fr').slice(0, 2));
+  const selectCatalogue = async piece => {
+    if (!await openingPage.locator('.library-panel').count()) await openingPage.getByRole('button', { name: 'Bibliothèque', exact: true }).click();
+    await openingPage.getByRole('button', { name: 'Catalogue public', exact: true }).click();
+    await openingPage.locator('.catalog-piece .piece').filter({ has: openingPage.locator('strong', { hasText: piece.title }) }).click();
+  };
+  for (const status of [200, 500]) {
+    let release, entered;
+    const waiting = new Promise(resolve => { entered = resolve; });
+    heldCatalogue = route => { release = () => route.fulfill({ status, contentType: 'application/xml', body: syntheticXML('Obsolete catalogue') }); entered(); };
+    await selectCatalogue(catalogue[0]); await waiting;
+    await selectCatalogue(catalogue[1]); await settledOpening(catalogue[1].title);
+    await release(); await openingPage.waitForLoadState('networkidle'); await settledOpening(catalogue[1].title);
+  }
+  // A stale error must also leave the next opening's loading state intact.
+  let releaseCatalogue, catalogueEntered;
+  const waitingCatalogue = new Promise(resolve => { catalogueEntered = resolve; });
+  heldCatalogue = route => { releaseCatalogue = () => route.fulfill({ status: 500, body: 'Synthetic failure' }); catalogueEntered(); };
+  await selectCatalogue(catalogue[0]); await waitingCatalogue;
+  await openingPage.evaluate(() => { window.__holdFile = 'loading-winner.musicxml'; });
+  await importOpening('Loading winner', 'loading-winner.musicxml');
+  await openingPage.waitForFunction(() => !!window.__releaseFile);
+  await releaseCatalogue();
+  await openingPage.waitForLoadState('networkidle');
+  assert.equal(await openingPage.locator('.loading-overlay').count(), 1);
+  assert.equal(await openingPage.locator('.error-card').count(), 0);
+  await releaseOpening('__releaseFile'); await settledOpening('Loading winner');
+
+  for (const failure of [false, true]) {
+    await openingPage.evaluate(() => { window.__holdFile = 'obsolete.musicxml'; });
+    await importOpening('Obsolete file', 'obsolete.musicxml');
+    await openingPage.waitForFunction(() => !!window.__releaseFile);
+    await importOpening('Import winner'); await settledOpening('Import winner');
+    await openingPage.evaluate(failure => { window.__releaseFile(failure ? 'Synthetic stale file error' : null); delete window.__releaseFile; }, failure);
+    await settledOpening('Import winner');
+    assert(!await openingPage.evaluate(async () => (await (await import('/src/lib/storage.ts')).savedScores()).some(score => score.title === 'Obsolete file')));
+  }
+  // Identical content IDs do not make an older choice current again.
+  await openingPage.evaluate(() => { window.__holdDigestTitle = 'Same content'; });
+  await importOpening('Same content'); await openingPage.waitForFunction(() => !!window.__releaseDigest);
+  await importOpening('Same content'); await settledOpening('Same content');
+  const loadsBefore = await openingPage.evaluate(() => window.__openingLoads.length);
+  await releaseOpening('__releaseDigest'); await settledOpening('Same content');
+  assert.equal(await openingPage.evaluate(() => window.__openingLoads.length), loadsBefore);
+
+  await openingPage.evaluate(() => { window.__holdEngineTitle = 'Obsolete engraving'; });
+  await importOpening('Obsolete engraving'); await openingPage.waitForFunction(() => !!window.__releaseEngine);
+  await importOpening('Engraving winner'); await settledOpening('Engraving winner');
+  await releaseOpening('__releaseEngine'); await settledOpening('Engraving winner');
+  await openingPage.evaluate(() => { window.__holdAudio = true; });
+  await importOpening('Obsolete instruments'); await openingPage.waitForFunction(() => !!window.__releaseAudio);
+  await openingPage.evaluate(() => { window.__holdFile = 'audio-winner.musicxml'; });
+  await importOpening('Audio winner', 'audio-winner.musicxml'); await openingPage.waitForFunction(() => !!window.__releaseFile);
+  await openingPage.evaluate(() => { window.__releaseAudio('Synthetic stale audio error'); delete window.__releaseAudio; });
+  await openingPage.waitForLoadState('networkidle');
+  assert.equal(await openingPage.locator('.loading-overlay').count(), 1);
+  assert.equal(await openingPage.locator('.error-card').count(), 0);
+  await releaseOpening('__releaseFile'); await settledOpening('Audio winner');
+
+  // A saved choice supersedes a pending catalogue fetch too.
+  let releaseSaved, savedEntered;
+  const waitingSaved = new Promise(resolve => { savedEntered = resolve; });
+  heldCatalogue = route => { releaseSaved = () => route.fulfill({ contentType: 'application/xml', body: syntheticXML('Old catalogue before library') }); savedEntered(); };
+  await selectCatalogue(catalogue[0]); await waitingSaved;
+  await openingPage.getByRole('button', { name: 'Mes partitions', exact: true }).click();
+  await openingPage.locator('.saved-piece .piece').filter({ has: openingPage.locator('strong', { hasText: 'Startup winner' }) }).click();
+  await settledOpening('Startup winner'); await releaseSaved(); await openingPage.waitForLoadState('networkidle'); await settledOpening('Startup winner');
+
+  // An A -> B -> A account round trip invalidates work even when scope matches again.
+  await openingPage.evaluate(async () => {
+    const sync = await import('/src/lib/sync.ts'), s = await import('/src/lib/storage.ts');
+    sync.setTakeSyncPaused(true);
+    const score = (await s.savedScores()).find(score => score.title === 'Startup winner');
+    await s.saveScore({ ...score, title: 'Account A' }, 'user:opening-a');
+    await s.saveScore({ ...score, title: 'Account B' }, 'user:opening-b');
+    s.setStorageScope('user:opening-a');
+  });
+  await settledOpening('Account A');
+  await openingPage.evaluate(() => { window.__holdFile = 'private-obsolete.musicxml'; });
+  await importOpening('Private obsolete', 'private-obsolete.musicxml'); await openingPage.waitForFunction(() => !!window.__releaseFile);
+  await openingPage.evaluate(async () => { const s = await import('/src/lib/storage.ts'); s.setStorageScope('user:opening-b'); });
+  await settledOpening('Account B');
+  await openingPage.evaluate(async () => { const s = await import('/src/lib/storage.ts'); s.setStorageScope('user:opening-a'); });
+  await settledOpening('Account A');
+  await releaseOpening('__releaseFile'); await settledOpening('Account A');
+  assert(await openingPage.evaluate(async () => {
+    const s = await import('/src/lib/storage.ts');
+    return (await Promise.all(['anonymous', 'user:opening-a', 'user:opening-b'].map(scope => s.savedScores(scope)))).every(scores => !scores.some(score => score.title === 'Private obsolete'));
+  }));
+  // A remote account choice reserves its generation immediately, while the
+  // active synthetic capture finishes and saves in its original scope.
+  await openingPage.getByRole('button', { name: 'Enregistrer un essai', exact: true }).click();
+  await openingPage.waitForFunction(() => !!document.querySelector('.take-button.recording'));
+  await openingPage.evaluate(async () => { const s = await import('/src/lib/storage.ts'); s.setStorageScope('user:opening-b'); });
+  assert.equal(await openingPage.locator('h1').innerText(), 'Account A');
+  assert.equal(await openingPage.locator('.take-button.recording').count(), 1);
+  await openingPage.getByRole('button', { name: 'Arrêter l’essai', exact: true }).click();
+  await settledOpening('Account B');
+  const capturedScopes = await openingPage.evaluate(async () => {
+    const s = await import('/src/lib/storage.ts');
+    return [(await s.listTakes('user:opening-a')).length, (await s.listTakes('user:opening-b')).length];
+  });
+  assert.deepEqual(capturedScopes, [1, 0]);
+  console.log('PASS browser: latest opening wins across startup, catalogue success/errors, import reads/hash, saved library, engraving/audio and A-B-A account changes; account opening waits for capture saved in its original scope');
+
   assert.deepEqual(errors, [], 'No unhandled browser errors');
 } finally {
   for (const context of contexts.reverse()) await context.close();

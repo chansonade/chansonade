@@ -44,11 +44,12 @@
   let currentXML = '';
   let documentScope = storageScope();
   let libraryScope = storageScope();
+  let libraryRequest: Promise<[SavedScore[], OrganizationSnapshot]> | null = null;
   let practiceDirty = false;
   let practiceTouched = false;
   let documentStarted = false;
   let defaultParts: Part[] = [];
-  let pendingAccountScope = $state<string | null>(null);
+  let pendingAccountOpening = $state.raw<Opening | null>(null);
   const initialTokens = new URLSearchParams(window.location.hash.slice(1));
   const initialInvitation = initialTokens.get('invitation') || '';
   const initialReset = initialTokens.get('reset') || '';
@@ -177,7 +178,17 @@
   let smoothedY = 0;
   let renderedSignature = '';
   let renderRevision = 0;
-  let openRevision = 0;
+  type ScoreSource =
+    | { kind: 'catalog'; example: typeof examples[number] }
+    | { kind: 'saved'; score: SavedScore }
+    | { kind: 'file'; file: File; folderId: string | null }
+    | { kind: 'take'; take: RecordedTake }
+    | { kind: 'library'; lastId: string | null; requestedId?: string | null };
+  type Opening = { scope: string; source: ScoreSource };
+  type DirectScoreSource = Exclude<ScoreSource, { kind: 'library' }>;
+  type ScoreDocument = { xml: string; id: string; info: { title: string; composer: string; subtitle?: string } };
+  type OpeningSteps<T = void> = Generator<Promise<unknown>, T, unknown>;
+  let opening: Opening | null = null;
   let highlighted = new Set<string>();
   let elementIndex = new Map<string, Element>();
   let layoutTimer: ReturnType<typeof setTimeout>;
@@ -221,9 +232,9 @@
       notify('Les réglages n’ont pas pu être sauvegardés sur cet appareil.');
     }
   }
-  async function restorePractice(id: string, scope: string, revision = openRevision, onlyUntouched = false) {
-    const saved = await readSettings(id, scope).catch(() => null);
-    if (revision !== openRevision || id !== currentId || scope !== documentScope) return false;
+  function* restorePractice(id: string, scope: string, onlyUntouched = false): OpeningSteps<boolean> {
+    const saved = yield* openingWait(readSettings(id, scope).catch(() => null));
+    if (id !== currentId || scope !== documentScope) return false;
     if (onlyUntouched && (practiceTouched || documentStarted || playing || takePhase !== 'idle')) return false;
     rate = saved?.rate || 1;
     const restoredLoop = canonicalLoopBounds(saved?.loopA ?? null, saved?.loopB ?? null, music?.legacyLoopTimes);
@@ -235,95 +246,169 @@
     practiceDirty = false; practiceTouched = false; documentStarted = false;
     return true;
   }
-  async function hydratePracticeIfUntouched(scope: string) {
+  function hydratePracticeIfUntouched(scope: string) {
+    return runOpening(opening, hydratePractice(scope));
+  }
+  function* hydratePractice(scope: string): OpeningSteps {
     if (!audioReady || busy || scope !== documentScope || scope !== storageScope() || practiceTouched || documentStarted || playing || takePhase !== 'idle') return;
-    if (await restorePractice(currentId, scope, openRevision, true)) {
+    if (yield* restorePractice(currentId, scope, true)) {
       audio.setRate(rate); applyMix(false); syncLoop(false);
     }
   }
 
-  async function openXML(xml: string, info: { title: string; composer: string; subtitle?: string }, id: string) {
-    stopReplay();
-    const nextScope = storageScope();
-    const revision = ++openRevision;
-    cancelTakePreparation();
-    if (takeCapture) await finishTake();
-    await savePractice();
-    if (revision !== openRevision || nextScope !== storageScope()) return;
-    ++renderRevision;
-    layoutBusy = false;
-    audio.pause();
-    audio.stopPiano();
-    busy = true;
-    playing = false;
-    audioReady = false;
-    error = '';
-    status = 'Préparation de la partition…';
-    loopSelecting = null;
-    clearPitchTrace();
-    captureTimeline.reset();
-    selection = null;
+  function isCurrentOpening(request: Opening | null): request is Opening {
+    return !!request && request === opening && request.scope === storageScope() && !disposed;
+  }
+  function* openingWait<T>(operation: Promise<T>): OpeningSteps<T> {
+    return (yield operation) as T;
+  }
+  async function runOpening<T>(request: Opening | null, steps: OpeningSteps<T>): Promise<T | undefined> {
+    if (!isCurrentOpening(request)) return;
+    let next = steps.next();
     try {
-      const requestedSignature = `${mode}:${viewportWidth}:${viewportHeight}:${zoom}`;
-      const result = await engine.load(xml, mode, viewportWidth - 48, zoom);
-      if (revision !== openRevision) return;
-      music = result.musical!;
-      currentXML = xml;
-      currentId = id;
-      title = info.title;
-      composer = info.composer;
-      subtitle = info.subtitle || 'Partition personnelle';
-      defaultParts = music.parts.map((part) => ({ ...part }));
-      parts = defaultParts.map((part) => ({ ...part }));
-      duration = music.duration;
-      position = 0;
-      follow = true;
-      documentScope = nextScope;
-      await restorePractice(id, nextScope);
-      if (revision !== openRevision) return;
-      renderedSignature = requestedSignature;
-      await installPages(result.pages);
-      if (revision !== openRevision) return;
-      libraryOpen = false;
-      busy = false;
-      if (`${mode}:${viewportWidth}:${viewportHeight}:${zoom}` !== requestedSignature) await relayout();
-      audioBusy = true;
-      status = 'Préparation des instruments…';
-      await audio.load(music.midi);
-      if (revision !== openRevision) return;
-      audio.setRate(rate);
-      applyMix(false);
-      syncLoop(false);
-      audioReady = true;
-      await hydratePracticeIfUntouched(nextScope);
-      duration = audio.duration || music.duration;
-      status = '';
-      try { localStorage.setItem('chansonade.last', id); } catch { /* Optional preference. */ }
-    } catch (cause) {
-      if (revision === openRevision) error = cause instanceof Error ? cause.message : String(cause);
+      while (!next.done) {
+        const result = await next.value.then(value => ({ value }), cause => ({ cause }));
+        if (!isCurrentOpening(request)) return;
+        next = 'cause' in result ? steps.throw(result.cause) : steps.next(result.value);
+      }
+      return next.value;
     } finally {
-      if (revision === openRevision) { busy = false; audioBusy = false; status = ''; }
+      // Supersession closes the steps through their finally blocks, without
+      // routing cancellation through ordinary save/playback error handlers.
+      if (!next.done) steps.return(undefined as T);
+    }
+  }
+  function chooseScore(source: ScoreSource): Promise<void> {
+    // The request itself is the generation: reserve it before the first await,
+    // including a deferred account switch or the initial library lookup.
+    const request = { scope: storageScope(), source };
+    opening = request;
+    ++renderRevision;
+    clearTimeout(layoutTimer);
+    layoutBusy = false;
+    if (source.kind === 'library' && takePhase !== 'idle') {
+      pendingAccountOpening = request;
+      return Promise.resolve();
+    }
+    pendingAccountOpening = null;
+    return runOpening(request, openScore(request));
+  }
+  function* openScore(request: Opening): OpeningSteps {
+    busy = true; audioBusy = false; error = '';
+    status = 'Préparation de la partition…';
+    try {
+      const source = yield* resolveScoreSource(request);
+      const document = yield* readScoreDocument(source, request.scope);
+      yield* installScoreDocument(source, document, request.scope);
+      if (source.kind === 'file') yield* saveImportedScore(source, document, request.scope);
+      else if (source.kind === 'take') yield* startScoreReplay(source.take);
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      if (isCurrentOpening(request)) { busy = false; audioBusy = false; status = ''; }
     }
   }
 
-  async function openExample(example: typeof examples[number]) {
-    const scope = storageScope();
-    error = '';
-    busy = true;
-    try {
-      const response = await fetch(`${import.meta.env.BASE_URL}scores/${example.file}`);
+  function* resolveScoreSource(request: Opening): OpeningSteps<DirectScoreSource> {
+    const { source, scope } = request;
+    if (source.kind !== 'library') return source;
+    if (documentScope !== scope) {
+      const saving = savePractice();
+      clearAccountDocument(scope);
+      yield* openingWait(saving);
+    }
+    const scores = yield* openingWait(reloadLibrary(scope));
+    const requested = publicCatalog.find(piece => piece.id === source.requestedId);
+    const saved = scores.find(score => score.id === source.lastId);
+    return requested ? { kind: 'catalog', example: requested }
+      : saved ? { kind: 'saved', score: saved }
+      : { kind: 'catalog', example: examples.find(example => ('id' in example && example.id === source.lastId) || example.file === source.lastId) || examples[0] };
+  }
+
+  function* readScoreDocument(source: DirectScoreSource, scope: string): OpeningSteps<ScoreDocument> {
+    if (source.kind === 'saved') return { xml: source.score.xml, id: source.score.id, info: source.score };
+    let xml: string, info: ScoreDocument['info'];
+    if (source.kind === 'catalog') {
+      const response = yield* openingWait(fetch(`${import.meta.env.BASE_URL}scores/${source.example.file}`));
       if (!response.ok) throw new Error('Impossible de charger cette partition.');
-      const xml = readMusicXML(await response.arrayBuffer());
-      if (scope !== storageScope()) return;
-      const id = await scoreId(xml);
+      xml = readMusicXML(yield* openingWait(response.arrayBuffer()));
+      info = source.example;
+    } else if (source.kind === 'file') {
+      void requestPersistentStorage();
+      if (source.file.size > MAX_SCORE_ARCHIVE_BYTES) throw new Error('L’archive MXL dépasse la limite de 10 Mio.');
+      xml = readMusicXML(yield* openingWait(source.file.arrayBuffer()));
+      info = metadata(xml, source.file.name);
+      checkScoreMetadata(info);
+    } else {
+      if (micActive) { pitch.stop(); micActive = false; pitchResult = null; }
+      xml = source.take.scoreXML;
+      info = { title: source.take.title, composer: metadata(xml, source.take.title).composer, subtitle: 'Partition de l’enregistrement' };
+    }
+    const id = yield* openingWait(scoreId(xml));
+    if (source.kind === 'catalog') {
       // Preserve settings created before catalogue entries used content IDs.
-      if (!await readSettings(id,scope)) {
-        const legacy = await readSettings(example.file,scope);
-        if (legacy) await writeSettings(id,legacy,scope);
+      const saved = yield* openingWait(readSettings(id, scope));
+      if (!saved) {
+        const legacy = yield* openingWait(readSettings(source.example.file, scope));
+        if (legacy) yield* openingWait(writeSettings(id, legacy, scope));
       }
-      if (scope !== storageScope()) return;
-      await openXML(xml, example, id);
-    } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); busy = false; }
+    }
+    return { xml, id, info };
+  }
+
+  function* installScoreDocument(source: DirectScoreSource, document: ScoreDocument, scope: string): OpeningSteps {
+    stopReplay();
+    cancelTakePreparation();
+    if (takeCapture) yield* openingWait(finishTake());
+    yield* openingWait(savePractice());
+    audio.pause(); audio.stopPiano(); playing = false;
+    const { xml, id, info } = document;
+    if (source.kind === 'take' && currentXML === xml) return;
+    audioReady = false;
+    loopSelecting = null;
+    clearPitchTrace(); captureTimeline.reset(); selection = null;
+    const requestedSignature = `${mode}:${viewportWidth}:${viewportHeight}:${zoom}`;
+    const result = yield* openingWait(engine.load(xml, mode, viewportWidth - 48, zoom));
+    music = result.musical!;
+    currentXML = xml; currentId = id;
+    title = info.title; composer = info.composer;
+    subtitle = info.subtitle || 'Partition personnelle';
+    defaultParts = music.parts.map(part => ({ ...part }));
+    parts = defaultParts.map(part => ({ ...part }));
+    duration = music.duration; position = 0; follow = true;
+    documentScope = scope;
+    yield* restorePractice(id, scope);
+    renderedSignature = requestedSignature;
+    yield* installPages(result.pages);
+    libraryOpen = false; busy = false;
+    if (`${mode}:${viewportWidth}:${viewportHeight}:${zoom}` !== requestedSignature) yield* layoutScore(opening);
+    audioBusy = true; status = 'Préparation des instruments…';
+    yield* openingWait(audio.load(music.midi));
+    audio.setRate(rate); applyMix(false); syncLoop(false); audioReady = true;
+    yield* hydratePractice(scope);
+    duration = audio.duration || music.duration;
+    try { localStorage.setItem('chansonade.last', id); } catch { /* Optional preference. */ }
+  }
+
+  function* saveImportedScore(source: Extract<ScoreSource, { kind: 'file' }>, document: ScoreDocument, scope: string): OpeningSteps {
+    const { id, info, xml } = document;
+    try {
+      yield* openingWait(saveScore({ id, ...info, xml, added: Date.now() }, scope));
+      if (source.folderId) yield* openingWait(moveItem('score', id, source.folderId, scope));
+      yield* openingWait(reloadLibrary(scope));
+    } catch { notify('Partition ouverte. Le navigateur n’a pas pu la conserver.'); }
+  }
+
+  function* startScoreReplay(take: RecordedTake): OpeningSteps {
+    const replay = ++replayRequest;
+    replaySamples = takePitchSamples(take, music!);
+    replayPosition = 0; replayURL = URL.createObjectURL(take.audio); replayTake = take;
+    selection = null; pendingPitchSamples = []; setFollow(true);
+    yield* openingWait(tick());
+    if (replay !== replayRequest || !replayAudio) return;
+    seekReplay(0);
+    try { yield* openingWait(replayAudio.play()); showControls(); }
+    catch { notify('Appuyez sur Lecture pour réécouter cet essai.'); }
   }
 
   async function addPublicPiece(piece:CatalogPiece) {
@@ -343,35 +428,19 @@
     finally { addingPublic = false; }
   }
 
-  async function importFile(file?: File) {
+  function importFile(file?: File) {
     if (!file) return;
-    void requestPersistentStorage();
-    const importScope = storageScope();
-    const importFolder = organization.folders.find(folder => folder.id === libraryFolder)?.id || null;
-    try {
-      if (file.size > MAX_SCORE_ARCHIVE_BYTES) throw new Error('L’archive MXL dépasse la limite de 10 Mio.');
-      const xml = readMusicXML(await file.arrayBuffer());
-      const info = metadata(xml, file.name);
-      checkScoreMetadata(info);
-      const id = await scoreId(xml);
-      if (importScope !== storageScope()) { notify('Le compte a changé. Relancez l’import dans la bibliothèque souhaitée.'); return; }
-      await openXML(xml, info, id);
-      if (currentId === id && music && documentScope === importScope) {
-        try {
-          await saveScore({ id, ...info, xml, added: Date.now() }, importScope);
-          if (importFolder) await moveItem('score',id,importFolder,importScope);
-          await reloadLibrary();
-        } catch { notify('Partition ouverte. Le navigateur n’a pas pu la conserver.'); }
-      }
-    } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
+    const folderId = organization.folders.find(folder => folder.id === libraryFolder)?.id || null;
     if (fileInput) fileInput.value = '';
+    return chooseScore({ kind: 'file', file, folderId });
   }
 
-  async function installPages(next: string[]) {
+  function* installPages(next: string[]): OpeningSteps {
+    const revision = renderRevision;
     pages = next;
     geometry = null;
-    await tick();
-    if (!content || !music) return;
+    yield* openingWait(tick());
+    if (revision !== renderRevision || !content || !music) return;
     const roots = content.querySelectorAll<SVGSVGElement>('.sheet-page > svg');
     for (const svg of roots) {
       const vb = svg.viewBox.baseVal;
@@ -382,7 +451,8 @@
       svg.setAttribute('role', 'img');
       svg.setAttribute('aria-label', title);
     }
-    await tick();
+    yield* openingWait(tick());
+    if (revision !== renderRevision) return;
     geometry = indexGeometry(content, music);
     if (selection) selection = [...geometry.notes.values()].find((note) => note.id === selection!.id) || null;
     elementIndex = new Map(Array.from(content.querySelectorAll('[id]')).map((el) => [el.id, el]));
@@ -400,18 +470,21 @@
     }
   });
 
-  async function relayout() {
+  function relayout() {
+    const request = opening;
+    return runOpening(request, layoutScore(request));
+  }
+  function* layoutScore(request: Opening | null): OpeningSteps {
     if (!music || busy || !viewport) return;
     const revision = ++renderRevision;
-    const open = openRevision;
     renderedSignature = `${mode}:${viewportWidth}:${viewportHeight}:${zoom}`;
     layoutBusy = true;
     try {
-      const result = await engine.layout(mode, viewportWidth - 48, zoom);
-      if (revision !== renderRevision || open !== openRevision) return;
-      await installPages(result.pages);
+      const result = yield* openingWait(engine.layout(mode, viewportWidth - 48, zoom));
+      if (revision !== renderRevision) return;
+      yield* installPages(result.pages);
     } catch (cause) { if (revision === renderRevision) notify(cause instanceof Error ? cause.message : String(cause)); }
-    finally { if (revision === renderRevision) layoutBusy = false; }
+    finally { if (revision === renderRevision && isCurrentOpening(request)) layoutBusy = false; }
   }
 
   function updateVisual(time: number, dt: number, instant = false) {
@@ -712,24 +785,7 @@
   }
   async function replay(take: RecordedTake) {
     if (takePhase !== 'idle') return;
-    stopReplay();
-    const scope = storageScope();
-    audio.pause();
-    if (micActive) { pitch.stop(); micActive = false; pitchResult = null; }
-    if (currentXML !== take.scoreXML) await openXML(take.scoreXML, { title: take.title, composer: metadata(take.scoreXML, take.title).composer, subtitle: 'Partition de l’enregistrement' }, await scoreId(take.scoreXML));
-    if (scope !== storageScope() || currentXML !== take.scoreXML || !music) return;
-    const request = ++replayRequest;
-    replaySamples = takePitchSamples(take, music);
-    replayPosition = 0;
-    replayURL = URL.createObjectURL(take.audio);
-    replayTake = take;
-    selection = null; pendingPitchSamples = []; setFollow(true);
-    await tick();
-    if (request !== replayRequest || scope !== storageScope()) return;
-    if (!replayAudio) return;
-    seekReplay(0);
-    try { await replayAudio.play(); showControls(); }
-    catch { notify('Appuyez sur Lecture pour réécouter cet essai.'); }
+    return chooseScore({ kind: 'take', take });
   }
   async function toggleReplay() {
     if (!replayTake || !replayAudio) return;
@@ -863,46 +919,34 @@
   }
 
   async function reloadLibrary(scope = storageScope()) {
-    const [scores,folders] = await Promise.all([savedScores(scope),readOrganization(scope)]);
-    if (!disposed && scope === storageScope()) { customScores = scores; organization = folders; libraryScope = scope; if(!libraryTabChosen && scores.length) libraryTab = 'personal'; }
+    const request = Promise.all([savedScores(scope), readOrganization(scope)]);
+    libraryRequest = request;
+    const [scores,folders] = await request;
+    if (!disposed && request === libraryRequest && scope === storageScope()) { customScores = scores; organization = folders; libraryScope = scope; if(!libraryTabChosen && scores.length) libraryTab = 'personal'; }
     return scores;
   }
-  async function openSavedScore(saved: SavedScore) {
+  function openSavedScore(saved: SavedScore) {
     if (libraryScope !== storageScope()) return;
-    await openXML(saved.xml, saved, saved.id);
+    return chooseScore({ kind: 'saved', score: saved });
   }
-  async function changeLibraryScope(scope: string) {
-    if (scope !== storageScope() || scope === documentScope) return;
-    try {
-      const previousId = currentId;
-      await savePractice();
-      if (disposed || scope !== storageScope()) return;
-      // Clear the previous account's document before any network or engraving
-      // wait; a logout must not leave its score visible behind the account UI.
-      ++openRevision; ++renderRevision;
-      stopReplay(); showTake(null);
-      audio.pause(); audio.stopPiano(); playing = false; audioReady = false;
-      position = 0; duration = 0; rate = 1; targetChannel = 0; loopA = null; loopB = null; loopEnabled = false; selection = null;
-      busy = false; audioBusy = false; layoutBusy = false;
-      music = null; pages = []; geometry = null; currentXML = ''; currentId = '';
-      title = 'Ouvrir une partition'; composer = ''; subtitle = ''; error = '';
-      documentScope = scope; defaultParts = []; parts = [];
-      organization = {folders:[],placements:{}}; libraryFolder = 'all'; librarySearch = ''; libraryTabChosen = false;
-      practiceDirty = false; practiceTouched = false; documentStarted = false;
-      clearPitchTrace(); captureTimeline.reset();
-      const scores = await reloadLibrary(scope);
-      if (disposed || scope !== storageScope()) return;
-      const saved = scores.find((score) => score.id === previousId);
-      if (saved) await openXML(saved.xml, saved, saved.id);
-      else await openExample(examples.find((example) => ('id' in example && example.id === previousId) || example.file === previousId) || examples[0]);
-    } catch { notify('Impossible de lire cette bibliothèque sur cet appareil.'); }
+  function clearAccountDocument(scope: string) {
+    // Clear the previous account before any storage, network or engraving wait.
+    stopReplay(); showTake(null);
+    audio.pause(); audio.stopPiano(); playing = false; audioReady = false;
+    position = 0; duration = 0; rate = 1; targetChannel = 0; loopA = null; loopB = null; loopEnabled = false; selection = null;
+    music = null; pages = []; geometry = null; currentXML = ''; currentId = '';
+    title = 'Ouvrir une partition'; composer = ''; subtitle = '';
+    documentScope = scope; defaultParts = []; parts = [];
+    organization = {folders:[],placements:{}}; libraryFolder = 'all'; librarySearch = ''; libraryTabChosen = false;
+    practiceDirty = false; practiceTouched = false; documentStarted = false;
+    clearPitchTrace(); captureTimeline.reset();
   }
   $effect(() => { setTakeSyncPaused(takePhase !== 'idle'); });
   $effect(() => {
-    if (pendingAccountScope && takePhase === 'idle') {
-      const scope = pendingAccountScope;
-      pendingAccountScope = null;
-      void changeLibraryScope(scope);
+    if (pendingAccountOpening && takePhase === 'idle') {
+      const request = pendingAccountOpening;
+      pendingAccountOpening = null;
+      void runOpening(request, openScore(request));
     }
   });
 
@@ -940,7 +984,10 @@
     frameRequest = requestAnimationFrame(animate);
     const stopStorage = subscribeStorage((event) => {
       if (event.scope !== storageScope()) return;
-      if (event.reason === 'scope') { stopReplay(); showTake(null); takeScope = event.scope; pendingAccountScope = event.scope; }
+      if (event.reason === 'scope') {
+        stopReplay(); showTake(null); takeScope = event.scope;
+        void chooseScore({ kind: 'library', lastId: currentId });
+      }
       else {
         void reloadLibrary(event.scope).catch(() => {});
         if (event.reason === 'remote') void hydratePracticeIfUntouched(event.scope);
@@ -948,18 +995,8 @@
       void reloadLastTake(event.scope).catch(() => {});
     });
     const stopSync = startSync();
-    void (async () => {
-      const scope = storageScope();
-      try { await reloadLibrary(scope); } catch { /* Local files remain available. */ }
-      try { await reloadLastTake(scope); } catch { /* Recording export remains available without persistent storage. */ }
-      if (scope !== storageScope()) return;
-      const last = localStorage.getItem('chansonade.last');
-      const saved = customScores.find((s) => s.id === last);
-      const requested = publicCatalog.find(piece => piece.id === requestedCatalogId);
-      if (requested) await openExample(requested);
-      else if (saved) await openXML(saved.xml, saved, saved.id);
-      else await openExample(examples.find((s) => ('id' in s && s.id === last) || s.file === last) || examples[0]);
-    })();
+    void reloadLastTake().catch(() => {});
+    void chooseScore({ kind: 'library', lastId: localStorage.getItem('chansonade.last'), requestedId: requestedCatalogId });
     if (import.meta.env.PROD && 'serviceWorker' in navigator) void navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL }).catch(() => {});
     return () => {
       disposed = true;
@@ -1021,7 +1058,7 @@
           {#if catalogueURL}<a class="public-catalog-link" href={`${catalogueURL}#${catalogGroup}`} target="_blank" rel="noopener noreferrer">{$t("Ouvrir le catalogue partageable")} <ArrowRight size={13} /></a>{/if}
           <div class="library-label">{$t(catalogGroups.find(group => group.id === catalogGroup)?.name || '')}<span>{filteredPublic.length}</span></div>
           {#each filteredPublic as piece}
-            <article class="catalog-piece"><button class="piece" class:chosen={currentId === piece.id} onclick={() => void openExample(piece)}><span class="piece-number"><Music2 size={16} /></span><span class="piece-description"><strong>{piece.title}</strong><small>{piece.composer}</small><small>{$t(piece.level)}{#if piece.minMidi !== undefined && piece.maxMidi !== undefined} · {noteLabel(piece.minMidi)}–{noteLabel(piece.maxMidi)}{/if}</small></span>{#if currentId === piece.id}<span class="piece-dot"></span>{/if}</button><div class="catalog-piece-actions"><span>{piece.license === 'CC0-1.0' ? 'CC0' : 'CC BY-SA'}</span><button disabled={addingPublic || takePhase !== 'idle' || customScores.some(score => score.id === piece.id)} onclick={() => void addPublicPiece(piece)}>{#if customScores.some(score => score.id === piece.id)}<Check size={13} /> {$t("Dans ma bibliothèque")}{:else}<Plus size={13} /> {$t("Ajouter à mes partitions")}{/if}</button></div><details class="catalog-credits"><summary>{$t("Source et licence")}</summary><p>{piece.credits} · <a href={piece.sourceUrl} target="_blank" rel="noopener noreferrer">{$t("Source")}</a> · <a href={piece.licenseUrl} target="_blank" rel="noopener noreferrer">{piece.license}</a></p></details></article>
+            <article class="catalog-piece"><button class="piece" class:chosen={currentId === piece.id} onclick={() => void chooseScore({ kind: 'catalog', example: piece })}><span class="piece-number"><Music2 size={16} /></span><span class="piece-description"><strong>{piece.title}</strong><small>{piece.composer}</small><small>{$t(piece.level)}{#if piece.minMidi !== undefined && piece.maxMidi !== undefined} · {noteLabel(piece.minMidi)}–{noteLabel(piece.maxMidi)}{/if}</small></span>{#if currentId === piece.id}<span class="piece-dot"></span>{/if}</button><div class="catalog-piece-actions"><span>{piece.license === 'CC0-1.0' ? 'CC0' : 'CC BY-SA'}</span><button disabled={addingPublic || takePhase !== 'idle' || customScores.some(score => score.id === piece.id)} onclick={() => void addPublicPiece(piece)}>{#if customScores.some(score => score.id === piece.id)}<Check size={13} /> {$t("Dans ma bibliothèque")}{:else}<Plus size={13} /> {$t("Ajouter à mes partitions")}{/if}</button></div><details class="catalog-credits"><summary>{$t("Source et licence")}</summary><p>{piece.credits} · <a href={piece.sourceUrl} target="_blank" rel="noopener noreferrer">{$t("Source")}</a> · <a href={piece.licenseUrl} target="_blank" rel="noopener noreferrer">{piece.license}</a></p></details></article>
           {/each}
           {#if !filteredPublic.length}<p class="library-empty">{$t("Aucun morceau ne correspond à cette recherche.")}</p>{/if}
         {/if}
