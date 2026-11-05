@@ -197,6 +197,146 @@ try {
   assert.deepEqual(isolation, { accountA: 0, accountB: 1, anonymous: 1 });
   console.log('PASS browser: scoped IndexedDB and account deletion reject stale writes without touching other scopes');
 
+  // Failed authentication must release its suspension and resume the same account.
+  const authAccount = { id: 'ci-auth-resume', email: 'auth-resume@example.invalid' };
+  const authContext = await isolatedContext(authAccount);
+  await authContext.route('**/auth-resume-fixture', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Synthetic authentication</title>' }));
+  let authFault, timedOutAuth, authSession = authAccount, authOffline = false, sessionReads = 0, changeReads = 0, rejectedPosts = 0, authRevision = 0, uploadedAuthTake = false;
+  const authChanges = [];
+  await authContext.route('**/api/v1/**', async route => {
+    const request = route.request(), path = new URL(request.url()).pathname.split('/api/v1/')[1];
+    if (authFault && path === authFault.path && request.method() === authFault.method) {
+      if (authFault.failure === 'network') return route.abort('internetdisconnected');
+      if (authFault.failure === 'timeout') { timedOutAuth = route; return; }
+      return route.fulfill({ status: authFault.failure, json: { message: 'Requête invalide.' } });
+    }
+    if (path === 'session' && request.method() === 'GET') {
+      sessionReads++;
+      if (authOffline) return route.abort('internetdisconnected');
+      return route.fulfill({ json: { user: authSession, registration: 'open' } });
+    }
+    assert.equal(request.headers()['x-chansonade-user'], authAccount.id);
+    if (path === 'mutations') { rejectedPosts++; return route.fulfill({ status: 422, json: { message: 'Requête invalide.' } }); }
+    if (path === 'changes') {
+      changeReads++;
+      const cursor = Number(new URL(request.url()).searchParams.get('cursor'));
+      return route.fulfill({ json: { cursor: authRevision, changes: authChanges.filter(resource => resource.revision > cursor) } });
+    }
+    if (path === 'takes') return route.fulfill({ json: { takes: uploadedAuthTake ? [{ id: 'auth-kept-take', title: 'Synthetic preserved take', ready: true, deleted: false }] : [] } });
+    if (path === 'takes/auth-kept-take' && request.method() === 'POST') { uploadedAuthTake = true; return route.fulfill({ json: { take: { ready: true } } }); }
+    if (path === 'account' && request.method() === 'DELETE') { authSession = null; return route.fulfill({ json: { deleted: true } }); }
+    throw Error(`Unexpected authentication fixture request: ${request.method()} ${path}`);
+  });
+  const authPage = await authContext.newPage(); await authPage.goto(`${url}/auth-resume-fixture`);
+  await authPage.clock.install(); await authPage.clock.pauseAt(new Date(Date.now() + 1000));
+  await authPage.evaluate(async () => {
+    const sync = await import('/src/lib/sync.ts'), s = await import('/src/lib/storage.ts');
+    const { microphoneWav } = await import('/src/lib/wav.ts');
+    window.__stopAuthSync = sync.startSync(); await sync.synchronize();
+    const xml = '<score-partwise version="4.0"><part-list/></score-partwise>';
+    const score = { id: 'auth-refused', title: 'x'.repeat(501), composer: 'Synthetic', xml, added: 1 };
+    await s.saveScore(score);
+    await s.saveScore({ ...score, id: 'other-refused', title: 'Other scope' }, 'user:auth-other');
+    await s.releaseRejectedMutation((await s.pendingMutations('user:auth-other'))[0], 'Other scope refusal');
+    await s.saveTake({ id: 'auth-kept-take', createdAt: 1, title: 'Synthetic preserved take', scoreId: score.id, scoreXML: xml, duration: 64 / 48000, sampleRate: 48000, samples: 64, captureStartedAt: 0, settings: { rate: 1, loopA: null, loopB: null, loopEnabled: false, target: 0, parts: [] }, latencyMs: 0, detector: { name: 'Synthetic' }, pitches: [], transport: [], audio: microphoneWav([new Float32Array(64)], 48000) });
+    await sync.synchronize();
+    window.__deletedAuthScopes = [];
+  });
+  assert.equal(rejectedPosts, 1);
+  const authSnapshot = () => authPage.evaluate(async () => {
+    const sync = await import('/src/lib/sync.ts'), s = await import('/src/lib/storage.ts');
+    await new Promise(resolve => {
+      const unsubscribe = sync.syncState.subscribe(state => { if (!state.busy) queueMicrotask(() => { unsubscribe(); resolve(); }); });
+    });
+    let state; const unsubscribe = sync.syncState.subscribe(value => state = value); unsubscribe();
+    return { state, scope: s.storageScope(), scores: await s.savedScores(), queue: await s.pendingMutations(s.storageScope()), takes: await s.listTakes(), other: await s.pendingMutations('user:auth-other'), deleted: window.__deletedAuthScopes };
+  });
+  const invokeFailedAuth = action => authPage.evaluate(async action => {
+    const sync = await import('/src/lib/sync.ts');
+    const actions = {
+      login: () => sync.login('auth-resume@example.invalid', 'synthetic-wrong-password'),
+      register: () => sync.createAccount('auth-resume@example.invalid', 'synthetic-password'),
+      logout: () => sync.logout(),
+      reset: () => sync.resetPassword('synthetic-expired-token', 'synthetic-password'),
+      delete: () => sync.deleteAccount('synthetic-wrong-password', scope => window.__deletedAuthScopes.push(scope)),
+    };
+    try { await actions[action](); return { resolved: true }; }
+    catch (cause) { return { name: cause.name, message: cause.message }; }
+  }, action);
+  for (const [action, path, method, failure] of [
+    ['login', 'session', 'POST', 401], ['delete', 'account', 'DELETE', 403],
+    ['register', 'accounts', 'POST', 400], ['logout', 'session', 'DELETE', 500], ['reset', 'password-reset', 'POST', 403],
+    ['login', 'session', 'POST', 'network'], ['delete', 'account', 'DELETE', 'network'],
+    ['login', 'session', 'POST', 'timeout'], ['delete', 'account', 'DELETE', 'timeout'],
+  ]) {
+    authFault = { path, method, failure };
+    const beforeSessions = sessionReads, beforeChanges = changeReads;
+    const requested = authPage.waitForRequest(request => new URL(request.url()).pathname.endsWith(`/api/v1/${path}`) && request.method() === method);
+    const attempt = invokeFailedAuth(action);
+    await requested;
+    if (failure === 'timeout') await authPage.clock.runFor(8_000);
+    const error = await attempt;
+    if (timedOutAuth) { await timedOutAuth.abort().catch(() => {}); timedOutAuth = null; }
+    assert.equal(error.resolved, undefined, `${action}/${failure}: authentication still rejects`);
+    if (typeof failure === 'number') assert.equal(error.message, 'Requête invalide.');
+    else assert.equal(error.name, failure === 'timeout' ? 'AbortError' : 'TypeError');
+    assert.equal(sessionReads, beforeSessions + 1, `${action}/${failure}: failed authentication must restart synchronization without another user event`);
+    assert.equal(changeReads, beforeChanges + 1);
+    const id = `remote-after-${action}-${failure}`;
+    authChanges.push({ kind: 'score', id, data: { id, title: id, composer: 'Synthetic', xml: '<score-partwise/>', added: 1 }, deleted: false, revision: ++authRevision });
+    const poll = authPage.waitForResponse(response => new URL(response.url()).pathname.endsWith('/api/v1/changes'));
+    await authPage.clock.runFor(30_000); await poll;
+    const snapshot = await authSnapshot();
+    assert.equal(sessionReads, beforeSessions + 2, `${action}/${failure}: the next periodic cycle must also run`);
+    assert(snapshot.scores.some(score => score.id === id), 'Periodic synchronization must apply new remote data');
+    assert.equal(snapshot.state.user.id, authAccount.id); assert.equal(snapshot.scope, `user:${authAccount.id}`);
+    assert(snapshot.scores.some(score => score.id === 'auth-refused'));
+    assert(snapshot.takes.some(take => take.id === 'auth-kept-take' && take.synced));
+    assert.equal(snapshot.queue[0].attempt.state, 'rejected'); assert.equal(rejectedPosts, 1, 'An unsuccessful authentication must not rearm unchanged rejected payloads');
+    assert.equal(snapshot.other[0].attempt.error, 'Other scope refusal'); assert.deepEqual(snapshot.deleted, []);
+  }
+  // A still-unavailable API must keep polling until the network recovers.
+  authFault = { path: 'session', method: 'POST', failure: 'network' }; authOffline = true;
+  const offlineReads = sessionReads;
+  assert.equal((await invokeFailedAuth('login')).name, 'TypeError');
+  assert.equal(sessionReads, offlineReads + 1);
+  assert.equal((await authSnapshot()).state.status, 'Hors ligne');
+  authOffline = false;
+  const recoveredPoll = authPage.waitForResponse(response => new URL(response.url()).pathname.endsWith('/api/v1/changes'));
+  await authPage.clock.runFor(30_000); await recoveredPoll;
+  assert.equal((await authSnapshot()).state.available, true);
+  assert.equal(sessionReads, offlineReads + 2);
+  // Releasing authentication must still respect recording suspension and stop.
+  authFault = { path: 'session', method: 'POST', failure: 401 };
+  await authPage.evaluate(async () => { (await import('/src/lib/sync.ts')).setTakeSyncPaused(true); });
+  let suspendedReads = sessionReads;
+  assert.equal((await invokeFailedAuth('login')).message, 'Requête invalide.');
+  await authPage.clock.runFor(90_000); assert.equal(sessionReads, suspendedReads);
+  let resumed = authPage.waitForResponse(response => new URL(response.url()).pathname.endsWith('/api/v1/changes'));
+  await authPage.evaluate(async () => { (await import('/src/lib/sync.ts')).setTakeSyncPaused(false); });
+  await authPage.clock.runFor(1); await resumed; await authSnapshot();
+  assert.equal(sessionReads, suspendedReads + 1);
+  await authPage.evaluate(() => window.__stopAuthSync());
+  suspendedReads = sessionReads;
+  assert.equal((await invokeFailedAuth('login')).message, 'Requête invalide.');
+  await authPage.clock.runFor(90_000); assert.equal(sessionReads, suspendedReads);
+  resumed = authPage.waitForResponse(response => new URL(response.url()).pathname.endsWith('/api/v1/changes'));
+  await authPage.evaluate(async () => { window.__stopAuthSync = (await import('/src/lib/sync.ts')).startSync(); });
+  await resumed; await authSnapshot(); assert.equal(sessionReads, suspendedReads + 1);
+  // The successful deletion still clears only its own scope and adopts logout.
+  authFault = null;
+  await authPage.evaluate(async () => { await (await import('/src/lib/sync.ts')).deleteAccount('synthetic-correct-password', scope => window.__deletedAuthScopes.push(scope)); });
+  const deletedAuth = await authSnapshot();
+  assert.equal(deletedAuth.state.user, null); assert.equal(deletedAuth.scope, 'anonymous');
+  assert.deepEqual(deletedAuth.deleted, [`user:${authAccount.id}`]);
+  assert.equal(deletedAuth.other[0].attempt.error, 'Other scope refusal');
+  assert.deepEqual(await authPage.evaluate(async () => {
+    const s = await import('/src/lib/storage.ts');
+    return [(await s.savedScores('user:ci-auth-resume')).length, (await s.listTakes('user:ci-auth-resume')).length, (await s.syncQueue('user:ci-auth-resume')).length];
+  }), [0, 0, 0]);
+  await authPage.evaluate(() => window.__stopAuthSync());
+  console.log('PASS browser: failed authentication/deletion (HTTP, network, timeout) preserves errors, account data and rejected payloads; immediate and periodic sync resume, recording pause and stop remain respected');
+
   // Lost acknowledgement: apply once on the mock server, abort the response,
   // then acknowledge the same immutable mutation ID on the next attempt.
   const account = { id: 'ci-sync-user', email: 'synthetic@example.invalid' };

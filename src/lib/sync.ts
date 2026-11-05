@@ -212,14 +212,20 @@ export function startSync() {
     events.close(); if (sessionEvents === events) sessionEvents = null;
   };
 }
-async function changeAuthentication(route: string, method: string, data?: unknown) {
+async function withAuthenticationChange(action: () => Promise<void>) {
   authChanging = true; epoch++; controller?.abort(); clearTimeout(timer);
-  try {
+  try { await action(); }
+  finally {
+    authChanging = false;
+    await synchronize();
+  }
+}
+function changeAuthentication(route: string, method: string, data?: unknown) {
+  return withAuthenticationChange(async () => {
     const result = await request<{ user?: User }>(route, { method, ...(data ? { body: JSON.stringify(data) } : {}) });
     session = null; sessionEvents?.postMessage(null);
     await adoptSession({ user: result.user || null, registration: state.registration });
-  } finally { authChanging = false; }
-  await synchronize();
+  });
 }
 export function login(email: string, password: string) { return changeAuthentication('session', 'POST', { email, password }); }
 export function createAccount(email: string, password: string, invitation?: string) { return changeAuthentication('accounts', 'POST', { email, password, ...(invitation ? { invitation } : {}) }); }
@@ -233,17 +239,15 @@ export async function deleteAccount(password: string, onDeleted: (scope: string)
   const account = state.user;
   if (!account) throw new Error('Connexion nécessaire.');
   const scope = `user:${account.id}`;
-  authChanging = true; epoch++; controller?.abort(); clearTimeout(timer);
-  let deleted = false;
-  try {
+  return withAuthenticationChange(async () => {
     await request('account', {method:'DELETE', body:JSON.stringify({password})}, account);
-    deleted = true; sessionEvents?.postMessage(null);
-    onDeleted(scope);
-    try { await forgetAccountScope(scope); }
-    catch { throw new Error('Compte supprimé du serveur. Effacez les données du site pour supprimer les copies locales restantes.'); }
-  } finally {
-    if (deleted) await adoptSession({user:null, registration:state.registration});
-    authChanging = false;
-  }
-  await synchronize();
+    try {
+      sessionEvents?.postMessage(null);
+      onDeleted(scope);
+      try { await forgetAccountScope(scope); }
+      catch { throw new Error('Compte supprimé du serveur. Effacez les données du site pour supprimer les copies locales restantes.'); }
+    } finally {
+      await adoptSession({user:null, registration:state.registration});
+    }
+  });
 }
