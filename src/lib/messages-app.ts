@@ -239,6 +239,14 @@ const messages: readonly [string, string, string, string][] = [
   ["Lien de récupération invalide ou expiré.", "Recovery link invalid or expired.", "Wiederherstellungslink ungültig oder abgelaufen.", "Herstelkoppeling ongeldig of verlopen."],
   ["Compte introuvable.", "Account not found.", "Konto nicht gefunden.", "Account niet gevonden."],
   ["Rouvrez la partition pour modifier sa mise en page.", "Reopen the score to change its layout.", "Öffne die Partitur erneut, um ihr Layout zu ändern.", "Open de partituur opnieuw om de opmaak te wijzigen."],
+  ["Le titre de la partition dépasse la limite de 500 caractères.", "The score title exceeds the 500-character limit.", "Der Titel der Partitur überschreitet die Grenze von 500 Zeichen.", "De titel van de partituur overschrijdt de limiet van 500 tekens."],
+  ["Le nom du compositeur dépasse la limite de 500 caractères.", "The composer name exceeds the 500-character limit.", "Der Name des Komponisten überschreitet die Grenze von 500 Zeichen.", "De naam van de componist overschrijdt de limiet van 500 tekens."],
+  ["Les métadonnées de l’essai sont invalides.", "The take metadata is invalid.", "Die Metadaten der Aufnahme sind ungültig.", "De metagegevens van de opname zijn ongeldig."],
+  ["Certaines ressources n’ont pas pu être synchronisées.", "Some resources could not be synced.", "Einige Ressourcen konnten nicht synchronisiert werden.", "Sommige gegevens konden niet worden gesynchroniseerd."],
+  ["{type} « {title} » : {message}", "{type} “{title}”: {message}", "{type} „{title}“: {message}", "{type} ‘{title}’: {message}"],
+  ["Réglages", "Settings", "Einstellungen", "Instellingen"],
+  ["Classement", "Organization", "Ordnung", "Indeling"],
+  ["Essai", "Take", "Aufnahme", "Opname"],
 ];
 
 export const appMessages: { en: Record<string, string>; de: Record<string, string>; nl: Record<string, string> } = {

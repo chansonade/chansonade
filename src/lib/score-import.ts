@@ -2,6 +2,14 @@ import { Unzip, UnzipInflate, unzipSync, type UnzipFileInfo } from 'fflate';
 
 export const MAX_SCORE_XML_BYTES = 5 * 1024 * 1024;
 export const MAX_SCORE_ARCHIVE_BYTES = 10 * 1024 * 1024;
+export const MAX_SCORE_METADATA_LENGTH = 500;
+
+/** Library ingress only; existing scores and recorded takes keep their metadata. */
+export function checkScoreMetadata(info: { title: string; composer: string }): void {
+  if (info.title.length > MAX_SCORE_METADATA_LENGTH) throw new Error('Le titre de la partition dépasse la limite de 500 caractères.');
+  if (info.composer.length > MAX_SCORE_METADATA_LENGTH) throw new Error('Le nom du compositeur dépasse la limite de 500 caractères.');
+}
+
 const MAX_ARCHIVE_ENTRIES = 256;
 const MAX_ARCHIVE_DECLARED_BYTES = 32 * 1024 * 1024;
 const MAX_CONTAINER_BYTES = 64 * 1024;

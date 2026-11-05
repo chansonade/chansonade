@@ -9,7 +9,7 @@ try {
   await page.goto(process.env.CHANSONADE_TEST_URL || 'http://127.0.0.1:5194');
   const result = await page.evaluate(async () => {
     const { readMusicXML, metadata, Score } = await import('/src/lib/score.ts');
-    const { checkScoreXML, MAX_SCORE_XML_BYTES, MAX_SCORE_ARCHIVE_BYTES } = await import('/src/lib/score-import.ts');
+    const { checkScoreXML, checkScoreMetadata, MAX_SCORE_XML_BYTES, MAX_SCORE_ARCHIVE_BYTES } = await import('/src/lib/score-import.ts');
     const { zipSync, strToU8, Zip, ZipDeflate } = await import('/node_modules/fflate/esm/browser.js');
     const check = (condition, message) => { if (!condition) throw new Error(message); };
     const rejects = (action, text) => {
@@ -17,6 +17,21 @@ try {
       throw new Error(`Expected rejection: ${text}`);
     };
     const xml = '<?xml version="1.0" encoding="UTF-8"?><score-partwise version="4.0"><work><work-title>Synthetic é</work-title></work><part-list/></score-partwise>';
+    const importXML = (title, composer) => `<score-partwise><work><work-title>${title}</work-title></work><identification><creator type="composer">${composer}</creator></identification><part-list/></score-partwise>`;
+    for (const value of ['x'.repeat(500), '🎵'.repeat(250)]) {
+      const info = metadata(importXML(value, value), 'fixture.xml');
+      checkScoreMetadata(info);
+      check(info.title === value && info.composer === value, '500 UTF-16 units must remain unchanged');
+    }
+    rejects(() => checkScoreMetadata(metadata(importXML('x'.repeat(501), 'Composer'), 'fixture.xml')), 'Le titre');
+    rejects(() => checkScoreMetadata(metadata(importXML('Title', 'x'.repeat(501)), 'fixture.xml')), 'Le nom du compositeur');
+    rejects(() => checkScoreMetadata(metadata('<score-partwise/>', 'x'.repeat(501) + '.xml')), 'Le titre');
+    check(metadata(importXML('x'.repeat(501), 'x'.repeat(501)), 'legacy.xml').title.length === 501, 'Existing score/take metadata stays readable');
+    const { setLanguage, translate } = await import('/src/lib/i18n.ts');
+    for (const language of ['en', 'de', 'nl']) {
+      setLanguage(language);
+      for (const key of ['Le titre de la partition dépasse la limite de 500 caractères.', 'Le nom du compositeur dépasse la limite de 500 caractères.']) check(translate(key) !== key, `${language}: missing import error translation`);
+    }
     const container = '<container><rootfiles><rootfile full-path="score.musicxml"/></rootfiles></container>';
     const archive = (extra = {}) => zipSync({ 'META-INF/container.xml': strToU8(container), 'score.musicxml': strToU8(xml), ...extra });
     const read = bytes => readMusicXML(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));

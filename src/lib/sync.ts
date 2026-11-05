@@ -1,13 +1,14 @@
 import { writable } from 'svelte/store';
 import { synchronizeTakes, TakeAPIError } from './take-sync';
-import { forgetAccountScope, takeSyncEntries, ANONYMOUS_SCOPE, storageScope, setStorageScope, subscribeStorage, pendingMutations, markMutationSent, releaseRejectedMutation, acceptMutation, applyRemoteChanges, syncCursor, syncConflicts, resolveSyncConflict, claimAnonymousLibrary, type LocalResource, type RemoteResource } from './storage';
+import { forgetAccountScope, syncQueue, rearmRejectedMutations, ANONYMOUS_SCOPE, storageScope, setStorageScope, subscribeStorage, pendingMutations, markMutationSent, releaseRejectedMutation, acceptMutation, applyRemoteChanges, syncCursor, syncConflicts, resolveSyncConflict, claimAnonymousLibrary, type LocalResource, type RemoteResource } from './storage';
 
 type User = { id: string; email: string };
 type Session = { user: User | null; registration: 'invite' | 'open' };
+export type SyncFailure = { kind: RemoteResource['kind'] | 'take'; id: string; title: string; message: string };
 export type SyncState = {
   user: User | null; registration: 'invite' | 'open'; available: boolean;
   status: 'Local' | 'Synchronisé' | 'En attente' | 'Hors ligne' | 'Conflit' | 'Connexion requise';
-  busy: boolean; pending: number; conflicts: LocalResource[]; message: string;
+  busy: boolean; pending: number; conflicts: LocalResource[]; failures: SyncFailure[]; message: string;
 };
 function cachedUser(): User | null {
   try {
@@ -15,13 +16,15 @@ function cachedUser(): User | null {
     return user && typeof user.id === 'string' && typeof user.email === 'string' ? user : null;
   } catch { return null; }
 }
-let user = cachedUser();
-setStorageScope(user ? `user:${user.id}` : ANONYMOUS_SCOPE);
-let state: SyncState = { user, registration: 'invite', available: false, status: user ? 'Hors ligne' : 'Local', busy: false, pending: 0, conflicts: [], message: '' };
+const cachedAccount = cachedUser();
+setStorageScope(cachedAccount ? `user:${cachedAccount.id}` : ANONYMOUS_SCOPE);
+let state: SyncState = { user: cachedAccount, registration: 'invite', available: false, status: cachedAccount ? 'Hors ligne' : 'Local', busy: false, pending: 0, conflicts: [], failures: [], message: '' };
 export const syncState = writable<SyncState>(state);
 function update(change: Partial<SyncState>) { state = { ...state, ...change }; syncState.set(state); }
 class APIError extends Error { constructor(message: string, public status: number) { super(message); } }
 const apiBase = `${import.meta.env.BASE_URL}api/v1/`;
+let session: Session | null = null;
+let sessionEvents: BroadcastChannel | null = null;
 let epoch = 0;
 let controller: AbortController | null = null;
 let timer: ReturnType<typeof setTimeout> | undefined;
@@ -49,9 +52,10 @@ async function request<T>(route: string, options: RequestInit = {}, account?: Us
     return body;
   } finally { clearTimeout(timeoutId); signal?.removeEventListener('abort', abort); }
 }
-function adoptSession(session: Session) {
-  const changed = user?.id !== session.user?.id;
-  user = session.user;
+async function adoptSession(next: Session) {
+  const changed = state.user?.id !== next.user?.id;
+  const fresh = !session || session.user?.id !== next.user?.id;
+  const user = next.user;
   if (changed) {
     epoch++;
     controller?.abort();
@@ -61,14 +65,18 @@ function adoptSession(session: Session) {
     if (user) localStorage.setItem('chansonade.account', JSON.stringify(user));
     else localStorage.removeItem('chansonade.account');
   } catch { /* Account isolation is also enforced in memory and by the API. */ }
-  update({ user, registration: session.registration, available: true, message: '', ...(changed ? { conflicts: [], pending: 0 } : {}), status: user ? 'En attente' : 'Local' });
+  update({ user, registration: next.registration, available: true, message: '', ...(changed ? { conflicts: [], failures: [], pending: 0 } : {}), status: user ? 'En attente' : 'Local' });
+  const adoptionEpoch = epoch;
+  if (fresh && user) await rearmRejectedMutations(`user:${user.id}`);
+  if (adoptionEpoch === epoch) session = next;
 }
 async function refreshCounts(scope: string, currentEpoch = epoch) {
-  const [pending, conflicts, takes] = await Promise.all([pendingMutations(scope), syncConflicts(scope), takeSyncEntries(scope)]);
+  const [queue, conflicts] = await Promise.all([syncQueue(scope), syncConflicts(scope)]);
   if (currentEpoch !== epoch || scope !== storageScope()) return;
-  const pendingCount = pending.length + takes.filter(take => take.pending).length;
-  update({ pending: pendingCount, conflicts, status: conflicts.length ? 'Conflit' : pendingCount ? 'En attente' : state.available ? 'Synchronisé' : 'Hors ligne' });
+  const failures: SyncFailure[] = queue.flatMap(job => 'error' in job.attempt ? [{ kind: job.kind, id: job.id, title: job.title, message: job.attempt.error }] : []);
+  update({ pending: queue.length, conflicts, failures, status: conflicts.length ? 'Conflit' : queue.length ? 'En attente' : state.available ? 'Synchronisé' : 'Hors ligne' });
 }
+
 function schedule(delay = 500) {
   if (stopped || authChanging || recordingPaused) return;
   clearTimeout(timer);
@@ -80,11 +88,11 @@ async function cycle() {
     // Recheck the cookie identity before processing a persisted outbox. Each
     // data request also binds this account explicitly, including across tabs.
     const sessionEpoch = epoch;
-    const session = await request<Session>('session');
+    const observed = await request<Session>('session');
     if (stopped || authChanging || recordingPaused || sessionEpoch !== epoch) return;
-    adoptSession(session);
-    if (!user) return;
-    const account = user, scope = storageScope(), currentEpoch = epoch;
+    await adoptSession(observed);
+    if (stopped || authChanging || recordingPaused || session !== observed || !observed.user) return;
+    const account = observed.user, scope = storageScope(), currentEpoch = epoch;
     controller = new AbortController();
     const signal = controller.signal;
     const current = () => !stopped && currentEpoch === epoch && !authChanging && !recordingPaused;
@@ -106,7 +114,11 @@ async function cycle() {
           method: 'POST', body: JSON.stringify({ mutations: [{ mutationId, kind, id, baseRevision, data, deleted }] }),
         }, account, signal);
       } catch (cause) {
-        if (cause instanceof APIError && [400, 413, 422].includes(cause.status)) await releaseRejectedMutation(mutation);
+        if (!current() || signal.aborted) throw cause;
+        if (cause instanceof APIError && [400, 413, 422].includes(cause.status)) {
+          await releaseRejectedMutation(mutation, cause.message);
+          continue;
+        }
         throw cause;
       }
       if (!current()) return;
@@ -128,24 +140,33 @@ async function cycle() {
     await synchronizeTakes(scope, account.id, signal, current);
     if (!current()) return;
     await refreshCounts(scope, currentEpoch);
-    if (state.pending) again = true;
+    if (!current()) return;
+    if (state.failures.length) {
+      // Poll changes and retry takes; unchanged rejected mutations stay skipped.
+      again = false;
+      update({ message: 'Certaines ressources n’ont pas pu être synchronisées.' });
+      schedule(30_000);
+    } else if (state.pending) again = true;
     else if (document.visibilityState === 'visible') schedule(30_000);
   } catch (cause) {
     if (stopped || authChanging || recordingPaused) return;
     const failedEpoch = epoch, failedScope = storageScope();
-    if (user) await refreshCounts(failedScope, failedEpoch).catch(() => {});
+    if (state.user) await refreshCounts(failedScope, failedEpoch).catch(() => {});
     if (stopped || authChanging || recordingPaused || failedEpoch !== epoch) return;
     // A rejected take stays pending, but retries must not spin at 300 ms.
     again = false;
-    if ((cause instanceof APIError || cause instanceof TakeAPIError) && (cause.status === 401 || cause.status === 403)) {
+    const apiFailure = cause instanceof APIError || cause instanceof TakeAPIError ? cause : null;
+    if (apiFailure && (apiFailure.status === 401 || apiFailure.status === 403)) {
       update({ status: 'Connexion requise', message: 'La session a changé. Reconnectez le compte pour synchroniser.' });
-    } else if ((cause instanceof APIError || cause instanceof TakeAPIError) && cause.status !== 404 && cause.status !== 502) {
-      update({ available: true, status: user ? 'En attente' : 'Local', message: cause.message });
-    } else {
+    } else if (apiFailure && apiFailure.status !== 404 && apiFailure.status !== 502) {
+      update({ available: true, status: state.user ? 'En attente' : 'Local', message: apiFailure.message });
+    } else if (apiFailure || cause instanceof TypeError || (cause instanceof DOMException && cause.name === 'AbortError')) {
       // A static self-hosted client without this API remains fully usable.
-      update({ available: false, status: user ? 'Hors ligne' : 'Local', message: user ? 'Les modifications sont conservées sur cet appareil.' : '' });
+      update({ available: false, status: state.user ? 'Hors ligne' : 'Local', message: state.user ? 'Les modifications sont conservées sur cet appareil.' : '' });
+    } else {
+      update({ status: state.user ? 'En attente' : 'Local', message: cause instanceof Error || cause instanceof DOMException ? cause.message : 'Impossible de lire la file de synchronisation.' });
     }
-    if (user && !stopped && !authChanging) schedule(30_000);
+    if (state.user && !stopped && !authChanging) schedule(30_000);
   } finally { controller = null; update({ busy: false }); }
 }
 export function synchronize(): Promise<void> {
@@ -168,7 +189,11 @@ export function startSync() {
   stopped = false;
   const online = () => schedule(0);
   const visible = () => { if (document.visibilityState === 'visible') schedule(0); };
-  const storage = (event: StorageEvent) => { if (event.key === 'chansonade.account') schedule(0); };
+  // Successful authentication is a session event even for the same account;
+  // rewriting an unchanged account cache would not notify the other tabs.
+  const events = new BroadcastChannel('chansonade.session');
+  sessionEvents = events;
+  events.onmessage = () => { session = null; epoch++; controller?.abort(); schedule(0); };
   stopListening?.();
   stopListening = subscribeStorage((event) => {
     if (event.scope !== storageScope() || event.scope === ANONYMOUS_SCOPE) return;
@@ -178,20 +203,21 @@ export function startSync() {
     }
   });
   window.addEventListener('online', online);
-  window.addEventListener('storage', storage);
   document.addEventListener('visibilitychange', visible);
-  if (user) void refreshCounts(storageScope()).catch(() => {});
+  if (state.user) void refreshCounts(storageScope()).catch(() => {});
   void synchronize();
   return () => {
     stopped = true; epoch++; controller?.abort(); clearTimeout(timer); stopListening?.(); stopListening = null;
-    window.removeEventListener('online', online); window.removeEventListener('storage', storage); document.removeEventListener('visibilitychange', visible);
+    window.removeEventListener('online', online); document.removeEventListener('visibilitychange', visible);
+    events.close(); if (sessionEvents === events) sessionEvents = null;
   };
 }
 async function changeAuthentication(route: string, method: string, data?: unknown) {
   authChanging = true; epoch++; controller?.abort(); clearTimeout(timer);
   try {
     const result = await request<{ user?: User }>(route, { method, ...(data ? { body: JSON.stringify(data) } : {}) });
-    adoptSession({ user: result.user || null, registration: state.registration });
+    session = null; sessionEvents?.postMessage(null);
+    await adoptSession({ user: result.user || null, registration: state.registration });
   } finally { authChanging = false; }
   await synchronize();
 }
@@ -204,19 +230,19 @@ export async function resetPassword(token: string, password: string) {
   await changeAuthentication('password-reset', 'POST', {token, password});
 }
 export async function deleteAccount(password: string, onDeleted: (scope: string) => void = () => {}) {
-  const account = user;
+  const account = state.user;
   if (!account) throw new Error('Connexion nécessaire.');
   const scope = `user:${account.id}`;
   authChanging = true; epoch++; controller?.abort(); clearTimeout(timer);
   let deleted = false;
   try {
     await request('account', {method:'DELETE', body:JSON.stringify({password})}, account);
-    deleted = true;
+    deleted = true; sessionEvents?.postMessage(null);
     onDeleted(scope);
     try { await forgetAccountScope(scope); }
     catch { throw new Error('Compte supprimé du serveur. Effacez les données du site pour supprimer les copies locales restantes.'); }
   } finally {
-    if (deleted) adoptSession({user:null, registration:state.registration});
+    if (deleted) await adoptSession({user:null, registration:state.registration});
     authChanging = false;
   }
   await synchronize();

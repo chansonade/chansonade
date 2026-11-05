@@ -60,8 +60,9 @@ justesse, jamais à corriger la détection ou à placer verticalement la voix.
 ## Données locales et synchronisation
 
 IndexedDB, base `chansonade` version 5, conserve les prises et WAV dans `takeData`,
-leurs résumés et tombstones dans `takeIndex`, les partitions et réglages dans `resources`, les mutations dans `outbox` et les repères
-de migration/synchronisation dans `meta`. Les anciens magasins et préférences sont
+leurs résumés et tombstones dans `takeIndex`, les partitions et réglages dans
+`resources`, les opérations de synchronisation (mutations et transferts d’essais)
+dans `outbox` et les repères de migration/synchronisation dans `meta`. Les anciens magasins et préférences sont
 repris sans effacer les originaux. localStorage conserve notamment les préférences
 d'appareil, le dernier morceau et l'identité de compte mise en cache.
 
@@ -72,6 +73,16 @@ les nouvelles modifications attendent la suivante. Les modifications locales en
 attente sont réessayées automatiquement en cas de concurrence ; l'autre version
 est sauvegardée localement. Une arrivée distante ne remplace pas
 les réglages d'une répétition déjà commencée.
+
+L’outbox est la source des opérations en attente et des erreurs affichées. Une
+mutation rejetée reste bloquée jusqu’à une modification locale ou au réarmement
+du compte à la confirmation d’une nouvelle session (chargement ou connexion,
+y compris depuis un autre onglet). Les connexions sont signalées entre onglets
+par un canal dédié, même si le compte reste identique. Les transferts d’essais,
+y compris les téléchargements sans copie locale, gardent leur erreur et sont
+réessayés. La découverte de la collection distante retire les téléchargements
+dont l’objet n’existe plus ; les envois et suppressions locaux restent en attente.
+L’empreinte d’un WAV immuable est conservée avec son transfert jusqu’à acquittement.
 
 `sync.ts` utilise l'API JSON relative `api/v1/`, vérifie la session et lie les
 requêtes au compte concerné. Les partitions, réglages et prises encore sans compte

@@ -50,6 +50,9 @@
   <p class="explanation">{$t("Réécoutez un essai avec sa partition et sa courbe de hauteur.")}</p>
   <p class="sync-note">{#if $syncState.user}<Cloud size={15} /> {$t('Synchronisation automatique avec votre compte.')}{:else}<HardDrive size={15} /> {$t('Conservés sur cet appareil. Connectez-vous pour les synchroniser.')}{/if}</p>
   {#if $syncState.user && $syncState.message}<p class="failure" role="status">{$t($syncState.message)}</p>{/if}
+  {#each $syncState.failures.filter(item => item.kind === 'take') as item}
+    <p class="failure">{$t('Essai « {title} » : {message}', { title: item.title, message: $t(item.message) })}</p>
+  {/each}
   {#if failure}<p class="failure" role="alert">{$t(failure)}</p>{/if}
   <input class="take-search" type="search" aria-label={$t("Rechercher un essai")} placeholder={$t("Rechercher un essai")} bind:value={search} />
   <FolderControls {organization} bind:selected={selectedFolder} onrefresh={refresh} {onerror} {blocked} />

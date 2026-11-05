@@ -85,9 +85,12 @@
       </form>
     {:else if $syncState.user}
       <p class="account-email">{$syncState.user.email}</p>
-      <div class="sync-status" role="status">{#if $syncState.busy}<LoaderCircle class="spin" size={15} />{/if}<span>{$t($syncState.status)}{#if $syncState.pending} · {$t($syncState.pending > 1 ? "{count} modifications" : "{count} modification", { count: $syncState.pending })}{/if}</span></div>
+      <div class="sync-status" role="status">{#if $syncState.busy}<LoaderCircle class="spin" size={15} />{/if}<span>{$t($syncState.status)}{#if $syncState.pending} · {$t($syncState.pending > 1 ? "{count} opérations en attente" : "{count} opération en attente", { count: $syncState.pending })}{/if}</span></div>
       <p>{$t("Partitions, réglages et enregistrements se synchronisent automatiquement avec votre compte.")}</p>
       {#if $syncState.message}<p class="warning">{$t($syncState.message)}</p>{/if}
+      {#each $syncState.failures as failure}
+        <p class="warning sync-failure">{$t('{type} « {title} » : {message}', { type: $t(({ score: 'Partition', settings: 'Réglages', organization: 'Classement', take: 'Essai' })[failure.kind]), title: failure.title, message: $t(failure.message) })}</p>
+      {/each}
       <p class="data-note">{$t('Lorsque vous êtes connecté, vos partitions, réglages, enregistrements et courbes sont envoyés au serveur pour les retrouver sur vos autres appareils. Le traitement du son reste sur cet appareil.')}</p>
       <button class="logout secondary" disabled={working || blocked} onclick={() => void perform(logout, true)}><LogOut size={15} /> {$t('Se déconnecter')}</button>
       <details class="account-management"><summary>{$t('Supprimer mon compte')}</summary>
@@ -118,6 +121,7 @@
 </div>
 
 <style>
+  .sync-failure { overflow-wrap: anywhere; }
   .data-note { font-size: 12px; }
   .account-management { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 16px; font-size: 13px; }
   .account-management summary { cursor: pointer; }

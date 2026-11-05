@@ -9,7 +9,7 @@
   import RepositoryLink from './lib/RepositoryLink.svelte';
   import Brand from './lib/Brand.svelte';
   import LanguagePicker from './lib/LanguagePicker.svelte';
-  import { MAX_SCORE_ARCHIVE_BYTES } from './lib/score-import';
+  import { MAX_SCORE_ARCHIVE_BYTES, checkScoreMetadata } from './lib/score-import';
   import { t, locale, noteName } from './lib/i18n';
   import TakePanel from './lib/TakePanel.svelte';
   import { takeMoment, takePitchSamples, takePitchCount, takeTraceStarts } from './lib/take-playback';
@@ -330,6 +330,7 @@
     if (addingPublic || takePhase !== 'idle') return;
     const scope = storageScope(); addingPublic = true;
     try {
+      checkScoreMetadata(piece);
       let xml = currentId === piece.id ? currentXML : '';
       if (!xml) { const response = await fetch(`${import.meta.env.BASE_URL}scores/${piece.file}`); if(!response.ok) throw new Error('Partition indisponible.'); xml = readMusicXML(await response.arrayBuffer()); }
       if (scope !== storageScope()) return;
@@ -351,6 +352,7 @@
       if (file.size > MAX_SCORE_ARCHIVE_BYTES) throw new Error('L’archive MXL dépasse la limite de 10 Mio.');
       const xml = readMusicXML(await file.arrayBuffer());
       const info = metadata(xml, file.name);
+      checkScoreMetadata(info);
       const id = await scoreId(xml);
       if (importScope !== storageScope()) { notify('Le compte a changé. Relancez l’import dans la bibliothèque souhaitée.'); return; }
       await openXML(xml, info, id);

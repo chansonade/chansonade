@@ -114,7 +114,7 @@ function db(): Promise<IDBDatabase> {
     request.onerror = () => { failed = true; reject(request.error); };
     request.onblocked = () => { failed = true; reject(new Error('Rechargez les autres onglets Chansonade pour activer la sauvegarde des essais.')); };
   }).then(async (connection) => {
-    try { await migrateLocalDatabase(connection); await migrateScopedData(connection); await migrateTakes(connection); return connection; }
+    try { await migrateLocalDatabase(connection); await migrateScopedData(connection); await migrateTakes(connection); await migrateSyncQueue(connection); return connection; }
     catch (cause) { connection.close(); throw cause; }
   });
   database = opening;
@@ -131,12 +131,12 @@ export type TakeSummary = {
   id: string; createdAt: number; title: string; duration: number; scoreId: string;
   synced: boolean; pending: boolean;
 };
-type TakeIndex = TakeSummary & { scope: string; deleted: boolean; change: number };
+type TakeIndex = Omit<TakeSummary, 'synced' | 'pending'> & { scope: string; deleted: boolean; change: number };
 type TakeData = { scope: string; id: string; take: RecordedTake };
 
-function takeSummary(take: RecordedTake, scope: string, pending: boolean): TakeIndex {
+function takeSummary(take: RecordedTake, scope: string): TakeIndex {
   return { scope, id: take.id, createdAt: take.createdAt, title: take.title, duration: take.duration,
-    scoreId: take.scoreId, synced: scope !== ANONYMOUS_SCOPE && !pending, pending, deleted: false, change: 1 };
+    scoreId: take.scoreId, deleted: false, change: 1 };
 }
 
 // The old, unscoped store remains untouched as a recovery copy. The marker and
@@ -154,7 +154,7 @@ async function migrateTakes(connection: IDBDatabase) {
         if (!cursor) { resolve(); return; }
         const take = cursor.value as RecordedTake;
         tx.objectStore('takeData').put({ scope: ANONYMOUS_SCOPE, id: take.id, take } satisfies TakeData);
-        tx.objectStore('takeIndex').put(takeSummary(take, ANONYMOUS_SCOPE, false));
+        tx.objectStore('takeIndex').put(takeSummary(take, ANONYMOUS_SCOPE));
         cursor.continue();
       };
     });
@@ -171,7 +171,8 @@ export async function saveTake(take: RecordedTake, scope = activeScope, folderId
     const old = await requestValue<TakeIndex | undefined>(index.get([scope, take.id]));
     if (old) throw new Error('Cet essai existe déjà.');
     tx.objectStore('takeData').put({ scope, id: take.id, take } satisfies TakeData);
-    index.put(takeSummary(take, scope, scope !== ANONYMOUS_SCOPE));
+    index.put(takeSummary(take, scope));
+    if (scope !== ANONYMOUS_SCOPE) tx.objectStore('outbox').put(takeJob(scope, take.id, take.title, 1, 'upload'));
     if (folderId !== undefined) {
       checkedItem('take', take.id);
       await writeResourceInTransaction(tx, 'organization', `take.${take.id}`, { type: 'placement', itemKind: 'take', itemId: take.id, folderId }, scope);
@@ -180,9 +181,7 @@ export async function saveTake(take: RecordedTake, scope = activeScope, folderId
   changed(scope, 'write');
 }
 export async function listTakes(scope = activeScope): Promise<TakeSummary[]> {
-  const connection = await db();
-  const records = await requestValue<TakeIndex[]>(connection.transaction('takeIndex').objectStore('takeIndex').index('scope').getAll(scope));
-  return records.filter(record => !record.deleted).sort((a,b) => b.createdAt - a.createdAt).map(({ id, createdAt, title, duration, scoreId, synced, pending }) => ({ id, createdAt, title, duration, scoreId, synced: scope !== ANONYMOUS_SCOPE && synced, pending }));
+  return (await takeSyncEntries(scope)).filter(record => !record.deleted).sort((a,b) => b.createdAt - a.createdAt);
 }
 export async function getTake(id: string, scope = activeScope): Promise<RecordedTake | null> {
   const connection = await db();
@@ -204,7 +203,8 @@ export async function deleteTake(id: string, scope = activeScope) {
     const index = tx.objectStore('takeIndex');
     const record = await requestValue<TakeIndex | undefined>(index.get([scope, id]));
     if (!record || record.deleted) return;
-    record.deleted = true; record.pending = scope !== ANONYMOUS_SCOPE; record.synced = false; record.change++;
+    record.deleted = true; record.change++;
+    if (scope !== ANONYMOUS_SCOPE) tx.objectStore('outbox').put(takeJob(scope, id, record.title, record.change, 'delete'));
     index.put(record); tx.objectStore('takeData').delete([scope, id]);
     const placement = await requestValue<LocalResource | undefined>(tx.objectStore('resources').get(key(scope, 'organization', `take.${id}`)));
     if (placement && !placement.deleted) await writeResourceInTransaction(tx, 'organization', `take.${id}`, null, scope);
@@ -229,7 +229,8 @@ export async function claimAnonymousTakes(scope: string) {
       if (await requestValue(index.get([scope, id]))) id = crypto.randomUUID();
       const take = id === source.id ? source.take : { ...source.take, id };
       data.put({ scope, id, take } satisfies TakeData);
-      index.put({ ...takeSummary(take, scope, true), change: record.change + 1 });
+      index.put({ ...takeSummary(take, scope), change: record.change + 1 });
+      tx.objectStore('outbox').put(takeJob(scope, id, take.title, record.change + 1, 'upload'));
       const placement = await requestValue<LocalResource | undefined>(resources.get(key(ANONYMOUS_SCOPE, 'organization', `take.${record.id}`)));
       if (placement && !placement.deleted && placement.data && 'type' in placement.data && placement.data.type === 'placement') {
         await writeResourceInTransaction(tx, 'organization', `take.${id}`, { ...placement.data, itemId: id }, scope);
@@ -241,39 +242,91 @@ export async function claimAnonymousTakes(scope: string) {
   if (moved) changed(scope, 'write');
 }
 
-export async function takeSyncEntries(scope: string): Promise<TakeIndex[]> {
+export async function takeSyncEntries(scope: string) {
   const connection = await db();
-  return requestValue(connection.transaction('takeIndex').objectStore('takeIndex').index('scope').getAll(scope));
+  return transaction(connection, ['takeIndex', 'outbox'], 'readonly', async tx => {
+    const records = await requestValue<TakeIndex[]>(tx.objectStore('takeIndex').index('scope').getAll(scope));
+    const jobs = new Map((await requestValue<SyncJob[]>(tx.objectStore('outbox').index('scope').getAll(scope))).filter(job => job.kind === 'take').map(job => [job.id, job]));
+    return records.map(record => ({ ...record, pending: jobs.has(record.id), synced: scope !== ANONYMOUS_SCOPE && !jobs.has(record.id) }));
+  });
 }
 export async function acknowledgeTake(scope: string, id: string, change: number) {
   const connection = await db();
-  await transaction(connection, ['takeIndex', 'meta'], 'readwrite', async tx => {
+  await transaction(connection, ['outbox', 'meta'], 'readwrite', async tx => {
     await assertAccountPresent(tx, scope);
-    const store = tx.objectStore('takeIndex');
-    const record = await requestValue<TakeIndex | undefined>(store.get([scope, id]));
-    if (!record || record.change !== change) return;
-    record.pending = false; record.synced = true; store.put(record);
+    const store = tx.objectStore('outbox');
+    const job = await requestValue<PendingTake | undefined>(store.get(key(scope, 'take', id)));
+    if (job?.change === change) store.delete(key(scope, 'take', id));
   });
   changed(scope, 'remote');
 }
-export async function applyRemoteTake(scope: string, id: string, take: RecordedTake | null) {
+
+/** Reconcile the complete remote collection with transfers and tombstones. */
+export async function queueRemoteTakes(scope: string, remote: readonly { id: string; title?: string; deleted: boolean; ready: boolean }[]) {
   const connection = await db();
   let didChange = false;
-  await transaction(connection, ['takeData', 'takeIndex', 'meta'], 'readwrite', async tx => {
+  const jobs = await transaction(connection, ['outbox', 'takeIndex', 'takeData', 'meta'], 'readwrite', async tx => {
     await assertAccountPresent(tx, scope);
-    const index = tx.objectStore('takeIndex'), data = tx.objectStore('takeData');
-    const current = await requestValue<TakeIndex | undefined>(index.get([scope, id]));
-    // A local deletion wins over an in-flight download. A server tombstone
-    // wins over a local upload, so deleted takes never reappear.
-    if (take && current) return;
-    if (!take) {
-      if (current?.deleted && !current.pending) return;
-      const tombstone: TakeIndex = current || { scope, id, createdAt: 0, title: '', duration: 0, scoreId: '', synced: true, pending: false, deleted: true, change: 0 };
-      tombstone.deleted = true; tombstone.pending = false; tombstone.synced = true; tombstone.change++;
-      index.put(tombstone); data.delete([scope, id]); didChange = true;
-    } else {
-      data.put({ scope, id, take } satisfies TakeData); index.put(takeSummary(take, scope, false)); didChange = true;
+    const outbox = tx.objectStore('outbox'), index = tx.objectStore('takeIndex');
+    const remoteIds = new Set(remote.map(item => item.id));
+    for (const job of await requestValue<SyncJob[]>(outbox.index('scope').getAll(scope))) {
+      if (job.kind === 'take' && job.operation === 'download' && !remoteIds.has(job.id)) {
+        outbox.delete(key(scope, 'take', job.id)); didChange = true;
+      }
     }
+    for (const item of remote) {
+      if (item.deleted) { didChange = await applyRemoteTakeInTransaction(tx, scope, item.id, null) || didChange; continue; }
+      if (!item.ready || await requestValue(index.get([scope, item.id])) || await requestValue(outbox.get(key(scope, 'take', item.id)))) continue;
+      outbox.put(takeJob(scope, item.id, item.title || item.id, 0, 'download'));
+    }
+    return (await requestValue<SyncJob[]>(outbox.index('scope').getAll(scope))).filter((job): job is PendingTake => job.kind === 'take');
+  });
+  if (didChange) changed(scope, 'remote');
+  return jobs;
+}
+export async function failTakeTransfer(job: PendingTake, error: string) {
+  const connection = await db();
+  await transaction(connection, ['outbox', 'meta'], 'readwrite', async tx => {
+    await assertAccountPresent(tx, job.scope);
+    const store = tx.objectStore('outbox'), recordKey = key(job.scope, 'take', job.id);
+    const current = await requestValue<PendingTake | undefined>(store.get(recordKey));
+    if (!current || current.change !== job.change || current.operation !== job.operation) return;
+    current.attempt = { state: 'retry', error }; store.put(current);
+  });
+  changed(job.scope, 'remote');
+}
+export async function cacheTakeDigest(job: PendingTake, digest: string) {
+  const connection = await db();
+  await transaction(connection, ['outbox', 'meta'], 'readwrite', async tx => {
+    await assertAccountPresent(tx, job.scope);
+    const store = tx.objectStore('outbox'), recordKey = key(job.scope, 'take', job.id);
+    const current = await requestValue<PendingTake | undefined>(store.get(recordKey));
+    if (!current || current.change !== job.change || current.operation !== 'upload') return;
+    current.audioSha256 = digest; store.put(current);
+  });
+}
+async function applyRemoteTakeInTransaction(tx: IDBTransaction, scope: string, id: string, take: RecordedTake | null): Promise<boolean> {
+  const index = tx.objectStore('takeIndex'), data = tx.objectStore('takeData'), outbox = tx.objectStore('outbox');
+  const current = await requestValue<TakeIndex | undefined>(index.get([scope, id]));
+  // A local deletion wins over an in-flight download; server tombstones win
+  // over uploads. The transfer is completed in the same transaction as its data.
+  if (take && current) return false;
+  if (!take) {
+    if (current?.deleted && !await requestValue(outbox.get(key(scope, 'take', id)))) return false;
+    const tombstone: TakeIndex = current || { scope, id, createdAt: 0, title: '', duration: 0, scoreId: '', deleted: true, change: 0 };
+    tombstone.deleted = true; tombstone.change++;
+    index.put(tombstone); data.delete([scope, id]);
+  } else {
+    data.put({ scope, id, take } satisfies TakeData); index.put(takeSummary(take, scope));
+  }
+  outbox.delete(key(scope, 'take', id));
+  return true;
+}
+export async function applyRemoteTake(scope: string, id: string, take: RecordedTake | null) {
+  const connection = await db();
+  const didChange = await transaction(connection, ['takeData', 'takeIndex', 'outbox', 'meta'], 'readwrite', async tx => {
+    await assertAccountPresent(tx, scope);
+    return applyRemoteTakeInTransaction(tx, scope, id, take);
   });
   if (didChange) changed(scope, 'remote');
 }
@@ -286,7 +339,11 @@ export type ResourceKind = 'score' | 'settings' | 'organization';
 export type ResourceData = SavedScore | PracticeSettings | FolderData | PlacementData;
 export type RemoteResource = { kind: ResourceKind; id: string; data: ResourceData | null; revision: number; deleted: boolean };
 export type Mutation = { mutationId: string; kind: ResourceKind; id: string; baseRevision: number; data: ResourceData | null; deleted: boolean };
-export type PendingMutation = Mutation & { scope: string; change: number; sent: boolean };
+export type SyncAttempt = { state: 'queued' | 'sent' } | { state: 'rejected' | 'retry'; error: string };
+type QueuedWork = { scope: string; change: number; title: string; attempt: SyncAttempt };
+export type PendingMutation = Mutation & QueuedWork;
+export type PendingTake = QueuedWork & { kind: 'take'; id: string; operation: 'upload' | 'download' | 'delete'; audioSha256?: string };
+export type SyncJob = PendingMutation | PendingTake;
 export type LocalResource = RemoteResource & { scope: string; change: number; dirty: boolean; conflict: RemoteResource | null };
 export type StorageChange = { scope: string; reason: 'write' | 'remote' | 'scope' };
 export const ANONYMOUS_SCOPE = 'anonymous';
@@ -324,9 +381,32 @@ function transaction<T>(connection: IDBDatabase, stores: string[], mode: IDBTran
     });
   });
 }
-function key(scope: string, kind: ResourceKind, id: string) { return [scope, kind, id]; }
+function key(scope: string, kind: ResourceKind | 'take', id: string) { return [scope, kind, id]; }
 function queueFor(record: LocalResource): PendingMutation {
-  return { scope: record.scope, kind: record.kind, id: record.id, mutationId: crypto.randomUUID(), baseRevision: record.revision, data: record.data, deleted: record.deleted, change: record.change, sent: false };
+  return { scope: record.scope, kind: record.kind, id: record.id, mutationId: crypto.randomUUID(), baseRevision: record.revision, data: record.data, deleted: record.deleted, change: record.change, title: record.data && 'title' in record.data ? record.data.title : record.id, attempt: { state: 'queued' } };
+}
+function takeJob(scope: string, id: string, title: string, change: number, operation: PendingTake['operation']): PendingTake {
+  return { scope, kind: 'take', id, title, change, operation, attempt: { state: 'queued' } };
+}
+async function migrateSyncQueue(connection: IDBDatabase) {
+  await transaction(connection, ['outbox', 'takeIndex', 'meta'], 'readwrite', async tx => {
+    const meta = tx.objectStore('meta');
+    if (await requestValue(meta.get('sync-queue-v1'))) return;
+    const outbox = tx.objectStore('outbox');
+    type OldMutation = Mutation & { scope: string; change: number; sent: boolean; error?: string };
+    for (const old of await requestValue<OldMutation[]>(outbox.getAll())) {
+      const { sent, error, ...mutation } = old;
+      outbox.put({ ...mutation, title: mutation.data && 'title' in mutation.data ? mutation.data.title : mutation.id,
+        attempt: error ? { state: 'rejected', error } : { state: sent ? 'sent' : 'queued' } } satisfies PendingMutation);
+    }
+    const index = tx.objectStore('takeIndex');
+    for (const old of await requestValue<(TakeIndex & { pending?: boolean; synced?: boolean })[]>(index.getAll())) {
+      const { pending, synced: _synced, ...record } = old;
+      index.put(record);
+      if (pending && record.scope !== ANONYMOUS_SCOPE) outbox.put(takeJob(record.scope, record.id, record.title, record.change, record.deleted ? 'delete' : 'upload'));
+    }
+    meta.put(true, 'sync-queue-v1');
+  });
 }
 function localRecord(scope: string, kind: ResourceKind, id: string, data: ResourceData | null, revision = 0): LocalResource {
   return { scope, kind, id, data, revision, deleted: data === null, change: 1, dirty: false, conflict: null };
@@ -372,7 +452,7 @@ async function writeResourceInTransaction(tx: IDBTransaction, kind: ResourceKind
   resources.put(record);
   if (record.dirty && !record.conflict) {
     const queued = await requestValue<PendingMutation | undefined>(outbox.get(key(scope, kind, id)));
-    if (!queued?.sent) outbox.put(queueFor(record));
+    if (queued?.attempt.state !== 'sent') outbox.put(queueFor(record));
   }
 }
 async function writeResource(kind: ResourceKind, id: string, data: ResourceData | null, scope: string) {
@@ -446,9 +526,25 @@ export async function moveItem(kind: 'score' | 'take', id: string, folderId: str
 export function saveScore(score: SavedScore, scope = activeScope) { return writeResource('score', score.id, score, scope); }
 export function writeSettings(id: string, settings: PracticeSettings, scope = activeScope) { return writeResource('settings', id, settings, scope); }
 export function deleteScore(id: string, scope = activeScope) { return writeResource('score', id, null, scope); }
-export async function pendingMutations(scope: string): Promise<PendingMutation[]> {
+export async function syncQueue(scope: string): Promise<SyncJob[]> {
   const connection = await db();
   return requestValue(connection.transaction('outbox').objectStore('outbox').index('scope').getAll(scope));
+}
+export async function pendingMutations(scope: string): Promise<PendingMutation[]> {
+  return (await syncQueue(scope)).filter((job): job is PendingMutation => job.kind !== 'take');
+}
+export async function pendingTakes(scope: string): Promise<PendingTake[]> {
+  return (await syncQueue(scope)).filter((job): job is PendingTake => job.kind === 'take');
+}
+export async function rearmRejectedMutations(scope: string) {
+  const connection = await db();
+  await transaction(connection, ['outbox', 'meta'], 'readwrite', async tx => {
+    await assertAccountPresent(tx, scope);
+    const store = tx.objectStore('outbox');
+    for (const job of await requestValue<SyncJob[]>(store.index('scope').getAll(scope))) {
+      if (job.attempt.state === 'rejected') { job.attempt = { state: 'queued' }; store.put(job); }
+    }
+  });
 }
 export async function markMutationSent(mutation: PendingMutation): Promise<boolean> {
   const connection = await db();
@@ -456,12 +552,12 @@ export async function markMutationSent(mutation: PendingMutation): Promise<boole
     await assertAccountPresent(tx, mutation.scope);
     const store = tx.objectStore('outbox');
     const current = await requestValue<PendingMutation | undefined>(store.get(key(mutation.scope, mutation.kind, mutation.id)));
-    if (!current || current.mutationId !== mutation.mutationId) return false;
-    current.sent = true; store.put(current);
+    if (!current || current.mutationId !== mutation.mutationId || current.attempt.state === 'rejected') return false;
+    current.attempt = { state: 'sent' }; store.put(current);
     return true;
   });
 }
-export async function releaseRejectedMutation(mutation: PendingMutation) {
+export async function releaseRejectedMutation(mutation: PendingMutation, error: string) {
   const connection = await db();
   await transaction(connection, ['resources', 'outbox', 'meta'], 'readwrite', async (tx) => {
     await assertAccountPresent(tx, mutation.scope);
@@ -473,7 +569,7 @@ export async function releaseRejectedMutation(mutation: PendingMutation) {
     // A validation rejection is definitive: no server write occurred. A later
     // edit may replace this payload; network failures keep it immutable.
     if (record.change !== queued.change) outbox.put(queueFor(record));
-    else { queued.sent = false; outbox.put(queued); }
+    else { queued.attempt = { state: 'rejected', error }; outbox.put(queued); }
   });
 }
 export async function acceptMutation(scope: string, mutationId: string, status: 'applied' | 'conflict', remote: RemoteResource) {
