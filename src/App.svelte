@@ -25,7 +25,7 @@
   import { finishCapturedTake, takeArchive, TakeMetadataBudget, type TakeCapture } from './lib/take-session';
   import { requestPersistentStorage } from './lib/storage-health';
   import { readPreference, writePreference } from './lib/preferences';
-  import { savedScores, saveScore, scoreId, readSettings, writeSettings, storageScope, subscribeStorage, listTakes, latestTake as loadLatestTake, type SavedScore, type RecordedTake, type TakePitch, type TakeTransport } from './lib/storage';
+  import { savedScores, saveScore, scoreId, readSettings, writeSettings, storageScope, subscribeStorage, listTakes, latestTake as loadLatestTake, type SavedScore, type PracticeSettings, type RecordedTake, type TakePitch, type TakeTransport } from './lib/storage';
 
   let engine: Score;
   const audio = new AudioPlayer();
@@ -236,15 +236,27 @@
     const saved = yield* openingWait(readSettings(id, scope).catch(() => null));
     if (id !== currentId || scope !== documentScope) return false;
     if (onlyUntouched && (practiceTouched || documentStarted || playing || takePhase !== 'idle')) return false;
-    rate = saved?.rate || 1;
     const restoredLoop = canonicalLoopBounds(saved?.loopA ?? null, saved?.loopB ?? null, music?.legacyLoopTimes);
     loopA = restoredLoop.start;
     loopB = restoredLoop.end;
     loopEnabled = saved?.loopEnabled || false;
-    targetChannel = parts.some((p) => p.channel === saved?.target) ? saved!.target : parts[0]?.channel || 0;
-    parts = defaultParts.map((p) => ({ ...p, ...saved?.parts.find((s) => s.channel === p.channel) }));
+    applySound(saved);
     practiceDirty = false; practiceTouched = false; documentStarted = false;
     return true;
+  }
+  /** Tempo, target voice and per-part mix: saved values over the score's own defaults. */
+  function applySound(saved: PracticeSettings | null) {
+    rate = saved?.rate || 1;
+    targetChannel = defaultParts.some((p) => p.channel === saved?.target) ? saved!.target : defaultParts[0]?.channel || 0;
+    parts = defaultParts.map((p) => ({ ...p, ...saved?.parts.find((s) => s.channel === p.channel) }));
+  }
+  function resetSound() {
+    const target = targetChannel;
+    applySound(null);
+    audio.setRate(rate);
+    applyMix();
+    if (targetChannel !== target) clearPitchTrace();
+    notify('Réglages de la partition rétablis.');
   }
   function hydratePracticeIfUntouched(scope: string) {
     return runOpening(opening, hydratePractice(scope));
@@ -374,7 +386,7 @@
     title = info.title; composer = info.composer;
     subtitle = info.subtitle || 'Partition personnelle';
     defaultParts = music.parts.map(part => ({ ...part }));
-    parts = defaultParts.map(part => ({ ...part }));
+    applySound(null);
     duration = music.duration; position = 0; follow = true;
     documentScope = scope;
     yield* restorePractice(id, scope);
@@ -1973,6 +1985,17 @@
             </div>
           {/each}
         </div>
+        <button
+          class="text-button practice-reset"
+          aria-describedby="practice-reset-help"
+          disabled={!audioReady}
+          onclick={resetSound}
+        >
+          <RotateCcw size={14} /> {$t("Rétablir les réglages de la partition")}
+        </button>
+        <p id="practice-reset-help" class="practice-reset-help">
+          {$t('Tempo, voix, mixage, sons et transpositions d’origine. La boucle et le décalage micro sont conservés.')}
+        </p>
         <div class="micro-settings">
           <div class="section-heading">
             <span>{$t("RETOUR DE VOIX")}</span

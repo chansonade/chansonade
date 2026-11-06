@@ -197,6 +197,179 @@ try {
   assert.deepEqual(isolation, { accountA: 0, accountB: 1, anonymous: 1 });
   console.log('PASS browser: scoped IndexedDB and account deletion reject stale writes without touching other scopes');
 
+  {
+    // Restore the score's musical defaults without resetting the practiced passage.
+    const resetAccount = { id: 'ci-reset-a', email: 'reset-a@example.invalid' };
+    const resetOther = { id: 'ci-reset-b', email: 'reset-b@example.invalid' };
+    let resetSession = resetAccount;
+    const resetContext = await isolatedContext(resetAccount);
+    await resetContext.route('**/api/v1/**', route => {
+      const path = new URL(route.request().url()).pathname.split('/api/v1/')[1];
+      if (path === 'session') return route.fulfill({ json: { user: resetSession, registration: 'open' } });
+      if (path === 'changes') return route.fulfill({ json: { cursor: 0, changes: [] } });
+      if (path === 'takes') return route.fulfill({ json: { takes: [] } });
+      return route.fulfill({ status: 422, json: { message: 'Requête invalide.' } }); // Keep pending writes inspectable.
+    });
+    const resetPage = await resetContext.newPage(); await resetPage.goto(url); await ready(resetPage);
+    const resetXML = `<score-partwise version="4.0"><work><work-title>Synthetic reset</work-title></work><part-list>${[1, 2].map(i => `<score-part id="P${i}"><part-name>Synthetic ${i}</part-name><midi-instrument id="I${i}"><midi-channel>${i}</midi-channel><midi-program>${i === 1 ? 54 : 43}</midi-program></midi-instrument></score-part>`).join('')}</part-list>${[1, 2].map(part => `<part id="P${part}">${Array.from({ length: 16 }, (_, i) => `<measure number="${i + 1}">${i ? '' : '<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes><direction><sound tempo="96"/></direction>'}${Array.from({ length: part === 1 ? 4 : 1 }, () => `<note><pitch><step>${part === 1 ? 'C' : 'E'}</step><octave>${part === 1 ? 4 : 3}</octave></pitch><duration>${part === 1 ? 1 : 4}</duration><type>${part === 1 ? 'quarter' : 'whole'}</type></note>`).join('')}</measure>`).join('')}</part>`).join('')}</score-partwise>`;
+    await resetPage.locator('input[type=file]').setInputFiles({ name: 'synthetic-reset.musicxml', mimeType: 'application/xml', buffer: Buffer.from(resetXML) });
+    await resetPage.waitForFunction(() => document.querySelector('h1')?.textContent === 'Synthetic reset'); await ready(resetPage);
+    const resetId = await resetPage.evaluate(async xml => (await import('/src/lib/storage.ts')).scoreId(xml), resetXML);
+    async function resetUI() {
+      return resetPage.evaluate(() => ({ rate: document.querySelector('.tempo-control input') ? Number(document.querySelector('.tempo-control input').value) : null, bpm: document.querySelector('.tempo-value strong') ? Number(document.querySelector('.tempo-value strong').textContent) : null, target: Number(document.querySelector('#voice-target').value), parts: [...document.querySelectorAll('.instrument-card')].map(card => ({ volume: Number(card.querySelector('input').value), muted: card.querySelector('.mute-button').getAttribute('aria-pressed') === 'true', solo: card.querySelector('.solo-button').getAttribute('aria-pressed') === 'true', transpose: Number(card.querySelector('.transpose-control span').textContent), program: Number(card.querySelector('select').value) })) }));
+    }
+    async function resetStored(predicate, scope = `user:${resetAccount.id}`) {
+      const deadline = Date.now() + 8000; let value;
+      do {
+        value = await resetPage.evaluate(async ({ id, scope }) => (await import('/src/lib/storage.ts')).readSettings(id, scope), { id: resetId, scope });
+        if (predicate(value)) return value;
+        await resetPage.waitForTimeout(25);
+      } while (Date.now() < deadline);
+      assert.fail(`Reset settings were not persisted: ${JSON.stringify(value)}`);
+    }
+    const resetNotes = resetPage.locator('.sheet-page .measure').first().locator('.staff').first().locator('.note .notehead');
+    await resetPage.getByTitle('Sélectionner un passage à répéter (L)', { exact: true }).click();
+    await resetNotes.first().click(); await resetNotes.last().click();
+    await resetPage.locator('.loop-region').waitFor();
+    await resetPage.locator('.atelier-button').click();
+    const channels = await resetPage.locator('#voice-target option').evaluateAll(options => options.map(o => Number(o.value)));
+    const defaults = await resetUI(); assert.equal(defaults.bpm, 96); assert.deepEqual(defaults.parts.map(p => p.program), [53, 42]);
+    const initial = await resetStored(s => s?.loopEnabled === true);
+    const expectedReset = { ...initial, rate: 1, target: channels[0], parts: defaults.parts.map((p, i) => ({ channel: channels[i], ...p })) };
+    await resetPage.evaluate(async () => {
+      const { AudioPlayer } = await import('/src/lib/audio.ts');
+      window.__resetCalls = [];
+      for (const method of ['setRate', 'setVolume', 'setMuted', 'setTranspose', 'setProgram', 'pause', 'load', 'seek']) {
+        const original = AudioPlayer.prototype[method];
+        AudioPlayer.prototype[method] = function(...args) { window.__resetAudio = this; window.__resetCalls.push([method, ...args]); return original.apply(this, args); };
+      }
+    });
+    async function alterSound() {
+      // Range input events are also the keyboard/touch path used by the application.
+      await resetPage.locator('.tempo-control input').evaluate(input => { input.value = '0.6'; input.dispatchEvent(new Event('input', { bubbles: true })); });
+      await resetPage.locator('#voice-target').selectOption(String(channels[1]));
+      const cards = resetPage.locator('.instrument-card');
+      for (let i = 0; i < 2; i++) {
+        await cards.nth(i).locator('select').selectOption('73');
+        await cards.nth(i).locator('input').evaluate(input => { input.value = '35'; input.dispatchEvent(new Event('input', { bubbles: true })); });
+        await cards.nth(i).locator('.transpose-control button').last().click();
+      }
+      await cards.first().locator('.mute-button').click(); await cards.last().locator('.solo-button').click();
+    }
+    await alterSound();
+    await resetPage.locator('#latency').evaluate(input => { input.value = '120'; input.dispatchEvent(new Event('input', { bubbles: true })); });
+    await resetStored(s => s?.rate === 0.6 && s.parts.every(p => p.program === 73 && p.volume === 35 && p.transpose === 1));
+    await resetPage.locator('.mixer-panel').getByRole('button', { name: 'Fermer les instruments', exact: true }).click();
+    await resetPage.locator('.transport .play-button').click();
+    await resetPage.waitForFunction(() => document.querySelector('.transport .play-button').classList.contains('is-playing'));
+    await resetPage.locator('.atelier-button').click();
+    const audioBeforeReset = await resetPage.evaluate(() => {
+      const audio = window.__resetAudio, analyser = audio.context.createAnalyser(); audio.synth.connect(analyser); window.__resetAnalyser = analyser;
+      window.__resetCalls = []; return { time: audio.time, contextTime: audio.context.currentTime };
+    });
+    const resetButton = resetPage.getByRole('button', { name: 'Rétablir les réglages de la partition', exact: true });
+    await resetButton.click();
+    assert.deepEqual(await resetUI(), defaults);
+    assert.equal(await resetPage.locator('#latency').inputValue(), '120');
+    assert.deepEqual(await resetStored(s => JSON.stringify(s) === JSON.stringify(expectedReset)), expectedReset);
+    const appliedReset = await resetPage.evaluate(() => ({ calls: window.__resetCalls, playing: window.__resetAudio.playing, rate: window.__resetAudio.sequencer.playbackRate, contextTime: window.__resetAudio.context.currentTime }));
+    assert(appliedReset.playing && appliedReset.contextTime > audioBeforeReset.contextTime); assert.equal(appliedReset.rate, 1);
+    assert.deepEqual(appliedReset.calls, [['setRate', 1], ...defaults.parts.flatMap((p, i) => [['setVolume', channels[i], p.volume], ['setMuted', channels[i], false], ['setTranspose', channels[i], 0], ['setProgram', channels[i], p.program]])]);
+    await resetPage.waitForFunction(() => { const analyser = window.__resetAnalyser, values = new Float32Array(analyser.fftSize); analyser.getFloatTimeDomainData(values); return values.some(v => Math.abs(v) > 0.001); });
+    const queuedReset = await resetPage.evaluate(async id => (await (await import('/src/lib/storage.ts')).pendingMutations('user:ci-reset-a')).filter(m => m.kind === 'settings' && m.id === id).at(-1)?.data, resetId);
+    assert.deepEqual(queuedReset, expectedReset, 'Reset is a normal scoped settings mutation, including the unchanged loop');
+    await resetPage.reload(); await ready(resetPage); await resetPage.locator('.atelier-button').click();
+    assert.deepEqual(await resetUI(), defaults); assert(await resetPage.locator('.loop-region').count());
+    assert.deepEqual(await resetStored(s => !!s), expectedReset);
+
+    // Reset during capture is a single musical boundary, keeping the raw WAV/history.
+    await alterSound();
+    await resetPage.locator('.mixer-panel').getByRole('button', { name: 'Fermer les instruments', exact: true }).click();
+    await resetPage.getByRole('button', { name: 'Enregistrer un essai', exact: true }).click();
+    await resetPage.waitForFunction(() => document.querySelector('.take-button.recording') && !document.querySelector('.take-button.recording').textContent.includes('…'));
+    await resetPage.locator('.atelier-button').click(); await resetButton.click();
+    assert.deepEqual(await resetUI(), defaults);
+    await resetPage.locator('.mixer-panel').getByRole('button', { name: 'Fermer les instruments', exact: true }).click();
+    await resetPage.getByRole('button', { name: 'Arrêter l’essai', exact: true }).click();
+    await resetPage.waitForFunction(() => document.querySelector('.take-button')?.disabled === false);
+    const resetTake = await resetPage.evaluate(async () => {
+      const s = await import('/src/lib/storage.ts'); const [summary] = await s.listTakes(); return s.getTake(summary.id);
+    });
+    assert.equal(resetTake.settings.rate, 0.6); assert.equal(resetTake.settings.target, channels[1]);
+    assert(resetTake.transport.some(p => p.rate === 1 && p.targetChannel === channels[0] && p.transpose === 0));
+    assert(await resetPage.evaluate(async id => (await (await import('/src/lib/storage.ts')).getTake(id)).audio.size > 44, resetTake.id));
+    await resetPage.getByRole('button', { name: 'Enregistrements', exact: true }).click(); await resetPage.locator('.take-card .review-play').click();
+    await resetPage.locator('.replay-heading').waitFor(); await resetPage.locator('.atelier-button').click();
+    assert(await resetButton.isEnabled(), 'Reset follows the individual mixer controls during replay');
+    assert.equal(await resetPage.locator('#practice-reset-help').innerText(), 'Tempo, voix, mixage, sons et transpositions d’origine. La boucle et le décalage micro sont conservés.');
+    async function replayState() {
+      return resetPage.evaluate(async id => {
+        const take = await (await import('/src/lib/storage.ts')).getTake(id);
+        const { audio, ...metadata } = take;
+        const player = document.querySelector('audio');
+        return { wav: Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await audio.arrayBuffer()))), metadata: JSON.stringify(metadata), src: player.getAttribute('src'), rate: player.playbackRate, volume: player.volume };
+      }, resetTake.id);
+    }
+    const replayBefore = await replayState();
+    await resetPage.locator('#voice-target').selectOption(String(channels[1]));
+    await resetPage.locator('.instrument-card').first().locator('select').selectOption('73');
+    await resetPage.locator('.instrument-card').first().locator('.transpose-control button').last().click();
+    await resetStored(s => s?.target === channels[1] && s.parts[0].program === 73 && s.parts[0].transpose === 1);
+    await resetButton.click();
+    assert.deepEqual(await resetUI(), { ...defaults, rate: null, bpm: null });
+    assert.deepEqual(await resetStored(s => JSON.stringify(s) === JSON.stringify(expectedReset)), expectedReset, 'Replay resets the current practice settings normally');
+    assert.deepEqual(await replayState(), replayBefore, 'Neither individual edits nor reset modify the saved take, WAV or replay source/rate/volume');
+    assert(await resetPage.locator('.replay-heading').isVisible());
+    await resetPage.locator('.mixer-panel').getByRole('button', { name: 'Fermer les instruments', exact: true }).click();
+    await resetPage.getByRole('button', { name: 'Quitter la réécoute', exact: true }).click();
+
+    for (const viewport of [{ width: 600, height: 900 }, { width: 900, height: 500 }]) {
+      await resetPage.setViewportSize(viewport); await resetPage.locator('.atelier-button').click();
+      await resetButton.scrollIntoViewIfNeeded(); await resetButton.focus();
+      const reachable = await resetButton.evaluate(button => { const r = button.getBoundingClientRect(); return r.height >= 44 && r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth && button.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)) && button.getAttribute('aria-describedby') === 'practice-reset-help'; });
+      assert(reachable, 'Reset remains reachable by touch and keyboard in portrait/landscape');
+      await resetPage.keyboard.press('Enter'); assert.deepEqual(await resetUI(), defaults);
+      await resetPage.locator('.mixer-panel').getByRole('button', { name: 'Fermer les instruments', exact: true }).click();
+    }
+    await resetPage.evaluate(async () => {
+      const i18n = await import('/src/lib/i18n.ts');
+      for (const language of ['en', 'de', 'nl']) for (const key of ['Rétablir les réglages de la partition', 'Tempo, voix, mixage, sons et transpositions d’origine. La boucle et le décalage micro sont conservés.', 'Réglages de la partition rétablis.']) {
+        i18n.setLanguage(language); if (i18n.translate(key) === key) throw Error(`Missing ${language} reset translation`);
+      }
+      i18n.setLanguage('fr');
+    });
+    const otherSettings = { ...expectedReset, rate: 0.8, target: channels[1], parts: expectedReset.parts.map(p => ({ ...p, transpose: -5 })) };
+    await resetPage.evaluate(async ({ id, xml, settings }) => { const s = await import('/src/lib/storage.ts'); await s.saveScore({ id, xml, title: 'Synthetic account B', composer: 'Synthetic', added: 1 }, 'user:ci-reset-b'); await s.writeSettings(id, settings, 'user:ci-reset-b'); }, { id: resetId, xml: resetXML, settings: otherSettings });
+    resetSession = resetOther;
+    await resetPage.evaluate(async () => { const sync = await import('/src/lib/sync.ts'); await sync.synchronize(); });
+    await resetPage.waitForFunction(() => document.querySelector('h1')?.textContent === 'Synthetic account B'); await ready(resetPage);
+    await resetPage.locator('.atelier-button').click(); assert.equal((await resetUI()).rate, 0.8);
+    await resetButton.click();
+    assert.deepEqual(await resetStored(s => s?.rate === 1, 'user:ci-reset-b'), expectedReset);
+    assert.deepEqual(await resetStored(s => !!s), expectedReset, 'Account A stays unchanged by resetting B');
+    await alterSound();
+    await resetStored(s => s?.rate === 0.6 && s.parts[0].transpose === 1, 'user:ci-reset-b');
+    await resetPage.evaluate(() => {
+      const read = File.prototype.arrayBuffer;
+      File.prototype.arrayBuffer = function() {
+        if (this.name !== 'reset-delayed.musicxml') return read.call(this);
+        return new Promise(resolve => { window.__finishResetRead = async () => resolve(await read.call(this)); });
+      };
+    });
+    await resetPage.locator('input[type=file]').setInputFiles({ name: 'reset-delayed.musicxml', mimeType: 'application/xml', buffer: Buffer.from(resetXML.replace('Synthetic reset', 'Synthetic delayed reset')) });
+    await resetPage.waitForFunction(() => !!window.__finishResetRead);
+    assert(await resetButton.isEnabled(), 'A pending import keeps the current document editable like individual controls');
+    assert(await resetPage.locator('#voice-target').isEnabled());
+    await resetButton.click();
+    assert.deepEqual(await resetUI(), defaults);
+    assert.deepEqual(await resetStored(s => s?.rate === 1, 'user:ci-reset-b'), expectedReset);
+    await resetPage.evaluate(() => window.__finishResetRead());
+    await resetPage.waitForFunction(() => document.querySelector('h1')?.textContent === 'Synthetic delayed reset'); await ready(resetPage);
+    assert(await resetButton.isEnabled());
+    console.log('PASS score reset: score-derived defaults, live audio/capture, editable replay with immutable WAV, persisted/scoped sync, preserved loop/latency, mobile accessibility and EN/DE/NL');
+
+  }
+
   // A microphone owns its context listener, even when the audio context outlives it.
   const lifecycleContext = await isolatedContext();
   await lifecycleContext.route('**/microphone-lifecycle', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Synthetic microphone lifecycle</title>' }));

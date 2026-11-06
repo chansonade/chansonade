@@ -255,6 +255,9 @@ input[type=range]:disabled { cursor: default; }
 .micro-settings select { margin: 2px 0 18px; }
 .micro-settings .microphone-source { overflow-wrap: anywhere; }
 .clear-trace { display: block; margin: 10px 0 0; padding-left: 0; }
+.practice-reset { display: flex; align-items: center; gap: 6px; flex-shrink: 0; min-height: 44px; margin-top: 14px; padding-left: 0; text-align: left; }
+.practice-reset svg { flex-shrink: 0; }
+.practice-reset-help { flex-shrink: 0; margin: 4px 0 0; color: var(--subtle); font-size: 12px; line-height: 1.6; }
 .export-button { display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 12px; border: 1px solid var(--line); border-radius: 7px; padding: 11px; margin-top: 25px; }
 .take-review { border-top: 1px solid var(--line); margin-top: 25px; padding-top: 20px; }
 .take-review>p { font-size: 13px; margin: 12px 0; }
