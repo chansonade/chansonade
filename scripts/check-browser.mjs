@@ -38,6 +38,11 @@ async function ready(page) {
 }
 const progress = page => page.locator('.timeline-row input[type="range"]').inputValue().then(Number);
 
+// Studio scenarios choose the imported row explicitly; upload itself only adds.
+async function openImported(page, title) {
+  await page.locator('.library-tree .file-open').filter({ has: page.getByText(title, { exact: true }) }).click();
+}
+
 try {
   const context = await isolatedContext();
   await context.route('**/api/v1/**', route => route.fulfill({ json: { user: null, registration: 'open' } }));
@@ -47,15 +52,14 @@ try {
   const title = 'CI synthetic score';
   const xml = original.replace(/<work-title>[^<]*<\/work-title>/, `<work-title>${title}</work-title>`);
   await page.locator('input[type="file"]').setInputFiles({ name: 'ci-synthetic.musicxml', mimeType: 'application/xml', buffer: Buffer.from(xml) });
+    await openImported(page, title);
   await page.waitForFunction(title => document.querySelector('h1')?.textContent === title, title); await ready(page);
   const pagesBefore = await page.locator('.sheet-page').count();
   assert(pagesBefore > 0);
   await page.locator('input[type="file"]').setInputFiles({ name: 'ci-too-large.musicxml', mimeType: 'application/xml', buffer: Buffer.alloc(5 * 1024 * 1024 + 1, 32) });
-  await page.locator('.error-card').waitFor();
-  assert.match(await page.locator('.error-card p').innerText(), /5 Mio/);
+  await page.locator('.toast').filter({ hasText: '5 Mio' }).waitFor();
   assert.equal(await page.locator('h1').innerText(), title, 'Rejected import keeps the current document');
   assert.equal(await page.locator('.sheet-page').count(), pagesBefore, 'Rejected import keeps the engraving');
-  await page.locator('.error-card').getByRole('button', { name: 'Fermer', exact: true }).click();
   console.log('PASS browser: valid import and oversized import without losing the document');
   const savedBefore = await page.evaluate(async () => (await (await import('/src/lib/storage.ts')).savedScores()).length);
   for (const invalid of [
@@ -63,12 +67,10 @@ try {
     original.replace(/<creator type="composer">[^<]*<\/creator>/, `<creator type="composer">${'x'.repeat(501)}</creator>`),
   ]) {
     await page.locator('input[type="file"]').setInputFiles({ name: 'invalid-metadata.musicxml', mimeType: 'application/xml', buffer: Buffer.from(invalid) });
-    await page.locator('.error-card').waitFor();
-    assert.match(await page.locator('.error-card p').innerText(), /500 caractères/);
+    await page.locator('.toast').filter({ hasText: '500 caractères' }).waitFor();
     assert.equal(await page.locator('h1').innerText(), title);
     assert.equal(await page.locator('.sheet-page').count(), pagesBefore);
     assert.equal(await page.evaluate(async () => (await (await import('/src/lib/storage.ts')).savedScores()).length), savedBefore);
-    await page.locator('.error-card').getByRole('button', { name: 'Fermer', exact: true }).click();
   }
   console.log('PASS browser: rejected title/composer preserves active score and library');
 
@@ -213,6 +215,7 @@ try {
     const resetPage = await resetContext.newPage(); await resetPage.goto(url); await ready(resetPage);
     const resetXML = `<score-partwise version="4.0"><work><work-title>Synthetic reset</work-title></work><part-list>${[1, 2].map(i => `<score-part id="P${i}"><part-name>Synthetic ${i}</part-name><midi-instrument id="I${i}"><midi-channel>${i}</midi-channel><midi-program>${i === 1 ? 54 : 43}</midi-program></midi-instrument></score-part>`).join('')}</part-list>${[1, 2].map(part => `<part id="P${part}">${Array.from({ length: 16 }, (_, i) => `<measure number="${i + 1}">${i ? '' : '<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes><direction><sound tempo="96"/></direction>'}${Array.from({ length: part === 1 ? 4 : 1 }, () => `<note><pitch><step>${part === 1 ? 'C' : 'E'}</step><octave>${part === 1 ? 4 : 3}</octave></pitch><duration>${part === 1 ? 1 : 4}</duration><type>${part === 1 ? 'quarter' : 'whole'}</type></note>`).join('')}</measure>`).join('')}</part>`).join('')}</score-partwise>`;
     await resetPage.locator('input[type=file]').setInputFiles({ name: 'synthetic-reset.musicxml', mimeType: 'application/xml', buffer: Buffer.from(resetXML) });
+    await openImported(resetPage, 'Synthetic reset');
     await resetPage.waitForFunction(() => document.querySelector('h1')?.textContent === 'Synthetic reset'); await ready(resetPage);
     const resetId = await resetPage.evaluate(async xml => (await import('/src/lib/storage.ts')).scoreId(xml), resetXML);
     async function resetUI() {
@@ -364,6 +367,7 @@ try {
     assert.deepEqual(await resetUI(), defaults);
     assert.deepEqual(await resetStored(s => s?.rate === 1, 'user:ci-reset-b'), expectedReset);
     await resetPage.evaluate(() => window.__finishResetRead());
+    await openImported(resetPage, 'Synthetic delayed reset');
     await resetPage.waitForFunction(() => document.querySelector('h1')?.textContent === 'Synthetic delayed reset'); await ready(resetPage);
     assert(await resetButton.isEnabled());
     console.log('PASS score reset: score-derived defaults, live audio/capture, editable replay with immutable WAV, persisted/scoped sync, preserved loop/latency, mobile accessibility and EN/DE/NL');
@@ -566,6 +570,7 @@ try {
     await preferencePage.waitForFunction(() => { const button = document.querySelector('.take-button'); return button && !button.disabled && !button.classList.contains('recording'); });
     const importedTitle = `Synthetic preference import ${failure}`;
     await preferencePage.locator('input[type="file"]').setInputFiles({ name: 'preference-import.musicxml', mimeType: 'application/xml', buffer: Buffer.from(preferenceXML(importedTitle)) });
+    await openImported(preferencePage, importedTitle);
     await preferencePage.waitForFunction(title => document.querySelector('h1')?.textContent === title && !document.querySelector('.loading-overlay') && document.querySelector('.play-button')?.disabled === false && !document.querySelector('.play-button .spin'), importedTitle);
     await preferencePage.evaluate(async () => { await (await import('/src/lib/sync.ts')).synchronize(); });
     const stored = await preferencePage.evaluate(async () => {
@@ -631,6 +636,7 @@ try {
   const musicalPage = await musicalContext.newPage(); await musicalPage.goto(url); await ready(musicalPage);
   const voicesXML = `<?xml version="1.0"?><score-partwise version="4.0"><work><work-title>Synthetic musical context</work-title></work><part-list>${[1, 2].map(index => `<score-part id="P${index}"><part-name>Voice ${index}</part-name><score-instrument id="I${index}"><instrument-name>Piano</instrument-name></score-instrument><midi-instrument id="I${index}"><midi-channel>${index}</midi-channel><midi-program>1</midi-program></midi-instrument></score-part>`).join('')}</part-list>${['C', 'E'].map((step, index) => `<part id="P${index + 1}">${Array.from({ length: 8 }, (_, bar) => `<measure number="${bar + 1}">${bar ? '' : '<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes><direction><sound tempo="60"/></direction>'}<note><pitch><step>${step}</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note></measure>`).join('')}</part>`).join('')}</score-partwise>`;
   await musicalPage.locator('input[type="file"]').setInputFiles({ name: 'musical-context.musicxml', mimeType: 'application/xml', buffer: Buffer.from(voicesXML) });
+    await openImported(musicalPage, 'Synthetic musical context');
   await musicalPage.waitForFunction(() => document.querySelector('h1')?.textContent === 'Synthetic musical context'); await ready(musicalPage);
   await musicalPage.getByRole('button', { name: 'Voix & instruments', exact: true }).click();
   const channels = await musicalPage.locator('#voice-target option').evaluateAll(options => options.map(option => Number(option.value)));
@@ -1298,26 +1304,16 @@ try {
         await new Promise((resolve, reject) => { window.__releaseAudio = error => error ? reject(Error(error)) : resolve(); });
       }
     };
-    const read = File.prototype.arrayBuffer;
-    File.prototype.arrayBuffer = async function() {
-      const result = await read.call(this);
-      if (this.name === window.__holdFile) {
-        window.__holdFile = null;
-        await new Promise((resolve, reject) => { window.__releaseFile = error => error ? reject(Error(error)) : resolve(); });
-      }
-      return result;
-    };
-    const digest = crypto.subtle.digest.bind(crypto.subtle);
-    crypto.subtle.digest = async (algorithm, data) => {
-      const result = await digest(algorithm, data);
-      if (window.__holdDigestTitle && new TextDecoder().decode(data).includes(window.__holdDigestTitle)) {
-        window.__holdDigestTitle = null;
-        await new Promise(resolve => { window.__releaseDigest = resolve; });
-      }
-      return result;
-    };
   });
-  const importOpening = (title, name = `${title}.musicxml`) => openingPage.locator('input[type="file"]').setInputFiles({ name, mimeType: 'application/xml', buffer: Buffer.from(syntheticXML(title)) });
+  const selectSavedOpening = async title => {
+    await openingPage.evaluate(async ({ title, xml }) => {
+      const s = await import('/src/lib/storage.ts');
+      await s.saveScore({ id: await s.scoreId(xml), title, composer: 'Synthetic', xml, added: Date.now() });
+    }, { title, xml: syntheticXML(title) });
+    if (!await openingPage.locator('.library-panel').count()) await openingPage.getByRole('button', { name: 'Bibliothèque', exact: true }).click();
+    await openingPage.getByRole('button', { name: 'Mes partitions', exact: true }).click();
+    await openImported(openingPage, title);
+  };
   const settledOpening = async title => {
     await openingPage.waitForFunction(title => document.querySelector('h1')?.textContent === title && document.querySelector('.transport .play-button')?.disabled === false && !document.querySelector('.loading-overlay'), title);
     await openingPage.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -1326,12 +1322,12 @@ try {
     assert.equal(await openingPage.locator('.sheet-page > svg').first().getAttribute('aria-label'), title);
   };
   const releaseOpening = name => openingPage.evaluate(name => { window[name](); delete window[name]; }, name);
-  await importOpening('Startup winner'); await settledOpening('Startup winner');
+  await selectSavedOpening('Startup winner'); await settledOpening('Startup winner');
   await releaseOpening('__releaseLibrary'); await openingPage.waitForLoadState('networkidle'); await settledOpening('Startup winner');
   assert.equal(catalogueRequests, 0, 'The superseded initial library lookup must not fetch its fallback');
   await openingPage.getByRole('button', { name: 'Bibliothèque', exact: true }).click();
   await openingPage.getByRole('button', { name: 'Mes partitions', exact: true }).click();
-  assert.equal(await openingPage.locator('.saved-piece strong').filter({ hasText: 'Startup winner' }).count(), 1, 'An old library read must not erase the newly imported score from the list');
+  assert.equal(await openingPage.locator('.saved-piece strong').filter({ hasText: 'Startup winner' }).count(), 1, 'An old library read must not erase the selected score from the list');
   await openingPage.locator('.library-panel').getByRole('button', { name: 'Fermer la bibliothèque', exact: true }).click();
   const catalogue = await openingPage.evaluate(async () => (await import('/src/lib/catalog.ts')).publicCatalog.filter(piece => piece.group === 'children-fr').slice(0, 2));
   const selectCatalogue = async piece => {
@@ -1352,54 +1348,52 @@ try {
   const waitingCatalogue = new Promise(resolve => { catalogueEntered = resolve; });
   heldCatalogue = route => { releaseCatalogue = () => route.fulfill({ status: 500, body: 'Synthetic failure' }); catalogueEntered(); };
   await selectCatalogue(catalogue[0]); await waitingCatalogue;
-  await openingPage.evaluate(() => { window.__holdFile = 'loading-winner.musicxml'; });
-  await importOpening('Loading winner', 'loading-winner.musicxml');
-  await openingPage.waitForFunction(() => !!window.__releaseFile);
+  await openingPage.evaluate(() => { window.__holdEngineTitle = 'Loading winner'; });
+  await selectSavedOpening('Loading winner');
+  await openingPage.waitForFunction(() => !!window.__releaseEngine);
   await releaseCatalogue();
   await openingPage.waitForLoadState('networkidle');
   assert.equal(await openingPage.locator('.loading-overlay').count(), 1);
   assert.equal(await openingPage.locator('.error-card').count(), 0);
-  await releaseOpening('__releaseFile'); await settledOpening('Loading winner');
-
-  for (const failure of [false, true]) {
-    await openingPage.evaluate(() => { window.__holdFile = 'obsolete.musicxml'; });
-    await importOpening('Obsolete file', 'obsolete.musicxml');
-    await openingPage.waitForFunction(() => !!window.__releaseFile);
-    await importOpening('Import winner'); await settledOpening('Import winner');
-    await openingPage.evaluate(failure => { window.__releaseFile(failure ? 'Synthetic stale file error' : null); delete window.__releaseFile; }, failure);
-    await settledOpening('Import winner');
-    assert(!await openingPage.evaluate(async () => (await (await import('/src/lib/storage.ts')).savedScores()).some(score => score.title === 'Obsolete file')));
-  }
-  // Identical content IDs do not make an older choice current again.
-  await openingPage.evaluate(() => { window.__holdDigestTitle = 'Same content'; });
-  await importOpening('Same content'); await openingPage.waitForFunction(() => !!window.__releaseDigest);
-  await importOpening('Same content'); await settledOpening('Same content');
-  const loadsBefore = await openingPage.evaluate(() => window.__openingLoads.length);
-  await releaseOpening('__releaseDigest'); await settledOpening('Same content');
-  assert.equal(await openingPage.evaluate(() => window.__openingLoads.length), loadsBefore);
+  await releaseOpening('__releaseEngine'); await settledOpening('Loading winner');
 
   await openingPage.evaluate(() => { window.__holdEngineTitle = 'Obsolete engraving'; });
-  await importOpening('Obsolete engraving'); await openingPage.waitForFunction(() => !!window.__releaseEngine);
-  await importOpening('Engraving winner'); await settledOpening('Engraving winner');
+  await selectSavedOpening('Obsolete engraving'); await openingPage.waitForFunction(() => !!window.__releaseEngine);
+  await selectSavedOpening('Engraving winner'); await settledOpening('Engraving winner');
   await releaseOpening('__releaseEngine'); await settledOpening('Engraving winner');
   await openingPage.evaluate(() => { window.__holdAudio = true; });
-  await importOpening('Obsolete instruments'); await openingPage.waitForFunction(() => !!window.__releaseAudio);
-  await openingPage.evaluate(() => { window.__holdFile = 'audio-winner.musicxml'; });
-  await importOpening('Audio winner', 'audio-winner.musicxml'); await openingPage.waitForFunction(() => !!window.__releaseFile);
+  await selectSavedOpening('Obsolete instruments'); await openingPage.waitForFunction(() => !!window.__releaseAudio);
+  await openingPage.evaluate(() => { window.__holdEngineTitle = 'Audio winner'; });
+  await selectSavedOpening('Audio winner'); await openingPage.waitForFunction(() => !!window.__releaseEngine);
   await openingPage.evaluate(() => { window.__releaseAudio('Synthetic stale audio error'); delete window.__releaseAudio; });
   await openingPage.waitForLoadState('networkidle');
   assert.equal(await openingPage.locator('.loading-overlay').count(), 1);
   assert.equal(await openingPage.locator('.error-card').count(), 0);
-  await releaseOpening('__releaseFile'); await settledOpening('Audio winner');
+  await releaseOpening('__releaseEngine'); await settledOpening('Audio winner');
 
   // A saved choice supersedes a pending catalogue fetch too.
   let releaseSaved, savedEntered;
   const waitingSaved = new Promise(resolve => { savedEntered = resolve; });
   heldCatalogue = route => { releaseSaved = () => route.fulfill({ contentType: 'application/xml', body: syntheticXML('Old catalogue before library') }); savedEntered(); };
   await selectCatalogue(catalogue[0]); await waitingSaved;
+  await openingPage.getByRole('button', { name: 'Bibliothèque', exact: true }).click();
   await openingPage.getByRole('button', { name: 'Mes partitions', exact: true }).click();
   await openingPage.locator('.saved-piece .piece').filter({ has: openingPage.locator('strong', { hasText: 'Startup winner' }) }).click();
   await settledOpening('Startup winner'); await releaseSaved(); await openingPage.waitForLoadState('networkidle'); await settledOpening('Startup winner');
+
+  // Adding a file does not own a pending studio opening or its panel state.
+  let releaseDuringAddition, duringAdditionEntered;
+  const duringAddition = new Promise(resolve => { duringAdditionEntered = resolve; });
+  heldCatalogue = route => { releaseDuringAddition = () => route.fulfill({ contentType: 'application/xml', body: syntheticXML('Catalogue during addition') }); duringAdditionEntered(); };
+  await selectCatalogue(catalogue[0]); await duringAddition;
+  await openingPage.locator('input[type=file]').setInputFiles({ name: 'independent-addition.musicxml', mimeType: 'application/xml', buffer: Buffer.from(syntheticXML('Independent addition')) });
+  await openingPage.locator('.library-tree .revealed').getByText('Independent addition', { exact: true }).waitFor();
+  await releaseDuringAddition(); await settledOpening(catalogue[0].title);
+  assert(await openingPage.locator('.library-panel').isVisible(), 'A previous studio opening must not close the newly revealed library');
+  assert.equal(await openingPage.locator('.saved-piece').getByText('Independent addition', { exact: true }).count(), 1);
+  await openingPage.locator('.library-panel .section-heading button').click();
+  // Keep the same saved content as the account fallback for the next regression.
+  await selectSavedOpening('Startup winner'); await settledOpening('Startup winner');
 
   // An A -> B -> A account round trip invalidates work even when scope matches again.
   await openingPage.evaluate(async () => {
@@ -1411,17 +1405,13 @@ try {
     s.setStorageScope('user:opening-a');
   });
   await settledOpening('Account A');
-  await openingPage.evaluate(() => { window.__holdFile = 'private-obsolete.musicxml'; });
-  await importOpening('Private obsolete', 'private-obsolete.musicxml'); await openingPage.waitForFunction(() => !!window.__releaseFile);
+  await openingPage.evaluate(() => { window.__holdEngineTitle = 'Private obsolete'; });
+  await selectSavedOpening('Private obsolete'); await openingPage.waitForFunction(() => !!window.__releaseEngine);
   await openingPage.evaluate(async () => { const s = await import('/src/lib/storage.ts'); s.setStorageScope('user:opening-b'); });
   await settledOpening('Account B');
   await openingPage.evaluate(async () => { const s = await import('/src/lib/storage.ts'); s.setStorageScope('user:opening-a'); });
   await settledOpening('Account A');
-  await releaseOpening('__releaseFile'); await settledOpening('Account A');
-  assert(await openingPage.evaluate(async () => {
-    const s = await import('/src/lib/storage.ts');
-    return (await Promise.all(['anonymous', 'user:opening-a', 'user:opening-b'].map(scope => s.savedScores(scope)))).every(scores => !scores.some(score => score.title === 'Private obsolete'));
-  }));
+  await releaseOpening('__releaseEngine'); await settledOpening('Account A');
   // A remote account choice reserves its generation immediately, while the
   // active synthetic capture finishes and saves in its original scope.
   await openingPage.getByRole('button', { name: 'Enregistrer un essai', exact: true }).click();
@@ -1436,7 +1426,203 @@ try {
     return [(await s.listTakes('user:opening-a')).length, (await s.listTakes('user:opening-b')).length];
   });
   assert.deepEqual(capturedScopes, [1, 0]);
-  console.log('PASS browser: latest opening wins across startup, catalogue success/errors, import reads/hash, saved library, engraving/audio and A-B-A account changes; account opening waits for capture saved in its original scope');
+  console.log('PASS browser: latest opening wins across startup, catalogue success/errors, saved library, engraving/audio and A-B-A account changes; account opening waits for capture saved in its original scope');
+
+  const additionContext = await isolatedContext(null, { reducedMotion: 'reduce' });
+  await additionContext.route('**/api/v1/**', route => route.fulfill({ json: { user: null, registration: 'open' } }));
+  const additionPage = await additionContext.newPage(); await additionPage.goto(url); await ready(additionPage);
+  await additionPage.locator('.atelier-button').click();
+  await additionPage.getByRole('slider', { name: 'Vitesse de lecture', exact: true }).evaluate(input => { input.value = '0.8'; input.dispatchEvent(new Event('input', { bubbles: true })); });
+  await additionPage.locator('.transpose-control').first().getByRole('button').last().click();
+  await additionPage.locator('.mixer-panel').getByRole('button', { name: 'Fermer les instruments', exact: true }).click();
+  // Playwright's predicate polling treats a Promise as truthy; await IDB in Node.
+  const settingsDeadline = Date.now() + 5000;
+  let additionSettings;
+  do {
+    additionSettings = await additionPage.evaluate(async () => (await import('/src/lib/storage.ts')).readSettings(localStorage.getItem('chansonade.last')));
+    if (additionSettings?.rate === 0.8 && additionSettings.parts[0].transpose === 1) break;
+    await additionPage.waitForTimeout(30);
+  } while (Date.now() < settingsDeadline);
+  assert.equal(additionSettings?.rate, 0.8); assert.equal(additionSettings.parts[0].transpose, 1);
+  const additionBaseline = await additionPage.evaluate(async () => {
+    const s = await import('/src/lib/storage.ts'), id = localStorage.getItem('chansonade.last');
+    window.__additionSVG = document.querySelector('.sheet-page > svg');
+    return { id, title: document.querySelector('h1').textContent, engraving: true, settings: await s.readSettings(id) };
+  });
+  await additionPage.locator('.play-button').click();
+  await additionPage.waitForFunction(() => Number(document.querySelector('.timeline-row input').value) > 0.1);
+  await additionPage.evaluate(async () => {
+    window.__additionCalls = [];
+    const { Score } = await import('/src/lib/score.ts'), { AudioPlayer } = await import('/src/lib/audio.ts');
+    for (const [type, methods] of [[Score, ['load', 'layout']], [AudioPlayer, ['load', 'pause', 'seek', 'setRate', 'setLoop', 'setVolume', 'setMuted', 'setProgram', 'setTranspose']]]) {
+      for (const method of methods) { const original = type.prototype[method]; type.prototype[method] = function(...args) { window.__additionCalls.push(method); return original.apply(this, args); }; }
+    }
+    const read = File.prototype.arrayBuffer;
+    File.prototype.arrayBuffer = async function() {
+      const data = await read.call(this);
+      if (this.name === window.__holdAdditionFile) {
+        window.__holdAdditionFile = null;
+        await new Promise((resolve, reject) => { window.__releaseAdditionFile = error => error ? reject(Error(error)) : resolve(); });
+      }
+      return data;
+    };
+    const put = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function(value, ...args) {
+      if (this.name === 'resources' && value.kind === 'organization' && value.id === window.__failAdditionPlacement) {
+        window.__failAdditionPlacement = null;
+        throw new DOMException('Synthetic storage failure', 'QuotaExceededError');
+      }
+      return put.call(this, value, ...args);
+    };
+  });
+  const additionFolders = await additionPage.evaluate(async () => {
+    const s = await import('/src/lib/storage.ts');
+    for (let i = 0; i < 12; i++) await s.createFolder(`Addition spacer ${i}`);
+    const parent = await s.createFolder('Addition parent'), child = await s.createFolder('Addition child', parent);
+    return { parent, child };
+  });
+  await additionPage.locator('.library-toggle').click();
+  await additionPage.getByRole('button', { name: 'Mes partitions', exact: true }).click();
+  const additionTree = additionPage.locator('.library-tree'), additionPanel = additionPage.locator('.library-panel');
+  const additionFolder = id => additionTree.locator(`[data-folder-id="${id}"] > .tree-row`);
+  const additionRow = id => additionTree.locator(`[data-kind="score"][data-id="${id}"]`);
+  const uploadAddition = (title, filename = `${title}.musicxml`) => additionPage.locator('input[type=file]').setInputFiles({ name: filename, mimeType: 'application/xml', buffer: Buffer.from(syntheticXML(title)) });
+  const additionId = title => additionPage.evaluate(async xml => (await import('/src/lib/storage.ts')).scoreId(xml), syntheticXML(title));
+  async function revealedAddition(title) {
+    await additionPage.waitForFunction(() => !document.querySelector('input[type=file]').disabled);
+    const id = await additionId(title), row = additionRow(id);
+    await row.locator('xpath=self::*[contains(@class,"revealed")]').waitFor();
+    await additionPage.waitForFunction(title => document.querySelector('.library-tree [role=status]')?.textContent.includes(title), title);
+    const box = await row.boundingBox(), panel = await additionPanel.boundingBox();
+    assert(box && panel && box.y >= panel.y - 1 && box.y + box.height <= panel.y + panel.height + 1, 'Reveal scrolls the score fully into the panel');
+    return id;
+  }
+  const additionPlacement = id => additionPage.evaluate(async id => (await (await import('/src/lib/storage.ts')).readOrganization()).classify('score', id), id);
+  await additionFolder(additionFolders.parent).locator('.disclosure').click();
+  await additionFolder(additionFolders.child).locator('.folder-select').click();
+  await additionFolder(additionFolders.parent).locator('.disclosure').click();
+  await additionPage.getByRole('searchbox').fill('Search hiding the new score');
+  const chooser = additionPage.waitForEvent('filechooser'); await additionPage.locator('.import-button').click();
+  await (await chooser).setFiles({ name: 'nested.musicxml', mimeType: 'application/xml', buffer: Buffer.from(syntheticXML('Addition nested')) });
+  const nestedAddition = await revealedAddition('Addition nested');
+  assert.equal((await additionPlacement(nestedAddition)).folderId, additionFolders.child);
+  assert.equal(await additionPage.getByRole('searchbox').inputValue(), '');
+  for (const id of Object.values(additionFolders)) assert.equal(await additionFolder(id).locator('.disclosure').getAttribute('aria-expanded'), 'true');
+  assert.equal(await additionRow(nestedAddition).locator('> .tree-row').evaluate(row => getComputedStyle(row).animationName), 'none', 'Reduced motion keeps a static highlight');
+  await additionTree.locator('.root-select').click();
+  await additionPanel.locator('.section-heading button').click();
+  const transfer = await additionPage.evaluateHandle(xml => { const transfer = new DataTransfer(); transfer.items.add(new File([xml], 'viewport.musicxml', { type: 'application/xml' })); return transfer; }, syntheticXML('Addition root'));
+  await additionPage.locator('.score-viewport').dispatchEvent('drop', { dataTransfer: transfer }); await transfer.dispose();
+  const rootAddition = await revealedAddition('Addition root'); assert.equal((await additionPlacement(rootAddition)).state, 'unfiled');
+  await additionPage.evaluate(async ({ id, settings }) => (await import('/src/lib/storage.ts')).writeSettings(id, settings), { id: nestedAddition, settings: additionBaseline.settings });
+  const beforeDuplicate = await additionPage.evaluate(async () => (await (await import('/src/lib/storage.ts')).savedScores()));
+  const { zipSync, strToU8 } = await import('fflate');
+  await additionPage.locator('input[type=file]').setInputFiles({ name: 'same-content.mxl', mimeType: 'application/octet-stream', buffer: Buffer.from(zipSync({ 'score.musicxml': strToU8(syntheticXML('Addition nested')) })) });
+  await revealedAddition('Addition nested');
+  assert.equal((await additionPlacement(nestedAddition)).folderId, additionFolders.child, 'An active duplicate stays in its original folder');
+  assert.deepEqual(await additionPage.evaluate(async () => (await (await import('/src/lib/storage.ts')).savedScores())), beforeDuplicate, 'Duplicate leaves score metadata and added dates intact');
+  await additionPage.evaluate(async id => (await import('/src/lib/storage.ts')).trashItem('score', id), nestedAddition);
+  await additionTree.locator('.root-select').click(); await uploadAddition('Addition nested'); await revealedAddition('Addition nested');
+  assert.equal((await additionPlacement(nestedAddition)).folderId, additionFolders.child, 'An explicitly trashed duplicate returns to its active folder');
+  await additionPage.evaluate(async id => (await import('/src/lib/storage.ts')).trashFolder(id), additionFolders.parent);
+  await uploadAddition('Addition nested'); await revealedAddition('Addition nested');
+  assert.equal((await additionPlacement(nestedAddition)).state, 'unfiled', 'Restoring a duplicate does not restore its trashed ancestors');
+  assert.deepEqual(await additionPage.evaluate(async ({ id, parent }) => { const s = await import('/src/lib/storage.ts'); return [(await s.readOrganization()).folder(parent).trashed, await s.readSettings(id)]; }, { id: nestedAddition, parent: additionFolders.parent }), [true, additionBaseline.settings]);
+  // Import placement is resolved in the transaction, even if the chosen folder disappears during file reading.
+  await additionPage.evaluate(async id => (await import('/src/lib/storage.ts')).restoreFolder(id), additionFolders.parent);
+  await additionFolder(additionFolders.parent).locator('.folder-select').click();
+  await additionPage.evaluate(() => { window.__holdAdditionFile = 'removed-parent.musicxml'; });
+  await uploadAddition('Addition absent parent', 'removed-parent.musicxml');
+  await additionPage.waitForFunction(() => !!window.__releaseAdditionFile);
+  await additionPage.evaluate(async id => { await (await import('/src/lib/storage.ts')).trashFolder(id); window.__releaseAdditionFile(); delete window.__releaseAdditionFile; }, additionFolders.parent);
+  const absentParentAddition = await revealedAddition('Addition absent parent'); assert.equal((await additionPlacement(absentParentAddition)).state, 'unfiled');
+  // Catalogue additions use exactly the same reveal path and leave the studio running.
+  await additionPanel.locator('.section-heading button').click();
+  await additionPage.locator('.add-current-score').click();
+  await additionRow(additionBaseline.id).locator('xpath=self::*[contains(@class,"revealed")]').waitFor();
+  const beforeFailure = await additionPage.evaluate(async () => (await (await import('/src/lib/storage.ts')).savedScores()).length);
+  await additionPage.locator('input[type=file]').setInputFiles({ name: 'invalid.musicxml', mimeType: 'application/xml', buffer: Buffer.from('<not-a-score/>') });
+  await additionPage.locator('.toast').filter({ hasText: 'Ce fichier ne contient pas de partition MusicXML.' }).waitFor();
+  await additionPage.evaluate(async xml => { window.__failAdditionPlacement = `score.${await (await import('/src/lib/storage.ts')).scoreId(xml)}`; }, syntheticXML('Addition storage failure'));
+  await uploadAddition('Addition storage failure');
+  await additionPage.locator('.toast').filter({ hasText: 'Le navigateur n’a pas pu ajouter cette partition à la bibliothèque.' }).waitFor();
+  assert.equal(await additionPage.evaluate(async () => (await (await import('/src/lib/storage.ts')).savedScores()).length), beforeFailure, 'A placement error rolls back the score insertion as well');
+  assert.deepEqual(await additionPage.evaluate(async baseline => {
+    const s = await import('/src/lib/storage.ts');
+    return { id: localStorage.getItem('chansonade.last'), title: document.querySelector('h1').textContent, engraving: document.querySelector('.sheet-page > svg') === window.__additionSVG, settings: await s.readSettings(baseline.id) };
+  }, additionBaseline), additionBaseline, 'Import/add/restore/failure never change the open score, engraving or settings');
+  assert.deepEqual(await additionPage.evaluate(() => window.__additionCalls), [], 'Imports never invoke engraving, audio loading, transport or mixing');
+  assert(await additionPage.locator('.play-button').getAttribute('class').then(value => value.includes('is-playing')));
+  assert(await progress(additionPage) > 0.1, 'Transport continues advancing during imports');
+  // A reveal expires and is consumed on drawer unmount, including repeat imports of the same content.
+  await additionTree.locator('.revealed').waitFor({ state: 'detached', timeout: 6000 });
+  await uploadAddition('Addition root'); await revealedAddition('Addition root');
+  await additionPanel.locator('.section-heading button').click(); await additionPage.locator('.library-toggle').click();
+  assert.equal(await additionTree.locator('.revealed').count(), 0, 'Reopening the drawer does not replay an old reveal');
+  // Error-card uploads also add without opening, after a genuine catalogue loading failure.
+  await additionPage.getByRole('button', { name: 'Catalogue public', exact: true }).click();
+  await additionContext.route('**/scores/*.musicxml', route => route.fulfill({ status: 500, body: 'Synthetic unavailable score' }));
+  await additionPage.locator('.catalog-piece .piece').first().click(); await additionPage.locator('.error-card').waitFor();
+  const errorChooser = additionPage.waitForEvent('filechooser');
+  await additionPage.locator('.error-card').getByRole('button', { name: 'Importer une partition', exact: true }).click();
+  await (await errorChooser).setFiles({ name: 'error-card.musicxml', mimeType: 'application/xml', buffer: Buffer.from(syntheticXML('Addition error card')) });
+  await revealedAddition('Addition error card'); assert.equal(await additionPage.locator('h1').innerText(), additionBaseline.title);
+  await additionContext.unroute('**/scores/*.musicxml');
+  // Pending reads and writes cannot survive an account round trip or the start of capture.
+  await additionPage.evaluate(() => { window.__holdAdditionFile = 'account-read.musicxml'; });
+  await uploadAddition('Addition cancelled account', 'account-read.musicxml'); await additionPage.waitForFunction(() => !!window.__releaseAdditionFile);
+  await additionPage.evaluate(async () => { const s = await import('/src/lib/storage.ts'); s.setStorageScope('user:addition-b'); s.setStorageScope('anonymous'); window.__releaseAdditionFile('Synthetic cancelled read error'); delete window.__releaseAdditionFile; });
+  await ready(additionPage);
+  assert(await additionPage.evaluate(async () => { const s = await import('/src/lib/storage.ts'); return (await Promise.all(['anonymous', 'user:addition-b'].map(scope => s.savedScores(scope)))).every(scores => !scores.some(score => score.title === 'Addition cancelled account')); }));
+  assert.equal(await additionPage.locator('.revealed').count(), 0);
+  assert.equal(await additionPage.locator('.toast').filter({ hasText: 'Synthetic cancelled read error' }).count(), 0);
+  if (await additionPanel.count()) await additionPanel.locator('.section-heading button').click();
+  await additionPage.waitForFunction(() => !document.querySelector('input[type=file]').disabled);
+  await additionPage.evaluate(() => { window.__holdAdditionFile = 'capture-read.musicxml'; });
+  await uploadAddition('Addition cancelled capture', 'capture-read.musicxml'); await additionPage.waitForFunction(() => !!window.__releaseAdditionFile);
+  await additionPage.getByRole('button', { name: 'Enregistrer un essai', exact: true }).click(); await additionPage.locator('.take-button.recording').waitFor();
+  assert(await additionPage.locator('input[type=file]').isDisabled());
+  await additionPage.evaluate(() => { window.__releaseAdditionFile(); delete window.__releaseAdditionFile; });
+  await additionPage.getByRole('button', { name: 'Arrêter l’essai', exact: true }).click();
+  await additionPage.waitForFunction(() => !document.querySelector('input[type=file]').disabled);
+  assert(!(await additionPage.evaluate(async () => (await (await import('/src/lib/storage.ts')).savedScores()).some(score => score.title === 'Addition cancelled capture'))));
+  for (const language of ['en', 'de', 'nl']) {
+    const message = await additionPage.evaluate(async language => { const i = await import('/src/lib/i18n.ts'); i.setLanguage(language); return i.translate('Partition « {title} » affichée dans votre bibliothèque.', { title: 'Addition root' }); }, language);
+    await uploadAddition('Addition root'); await additionPage.waitForFunction(message => document.querySelector('.library-tree [role=status]')?.textContent === message, message);
+    assert(!message.startsWith('Partition «'));
+  }
+  // Cancel a real write transaction after its score and outbox writes have been issued.
+  await additionPage.evaluate(async () => (await import('/src/lib/storage.ts')).setStorageScope('user:addition-source'));
+  await ready(additionPage);
+  const cancelledWriteId = await additionPage.evaluate(async xml => {
+    const s = await import('/src/lib/storage.ts'), id = await s.scoreId(xml), put = IDBObjectStore.prototype.put;
+    window.__additionWriteCancelled = false;
+    IDBObjectStore.prototype.put = function(value, ...args) {
+      const result = put.call(this, value, ...args);
+      if (this.name === 'resources' && value.kind === 'organization' && value.id === `score.${id}`) {
+        IDBObjectStore.prototype.put = put;
+        window.__additionWriteCancelled = true;
+        s.setStorageScope('user:addition-destination');
+      }
+      return result;
+    };
+    return id;
+  }, syntheticXML('Addition cancelled write'));
+  await uploadAddition('Addition cancelled write');
+  await additionPage.waitForFunction(() => window.__additionWriteCancelled); await ready(additionPage);
+  assert.deepEqual(await additionPage.evaluate(async id => {
+    const s = await import('/src/lib/storage.ts');
+    return Promise.all(['user:addition-source', 'user:addition-destination'].map(async scope => [
+      (await s.savedScores(scope)).some(score => score.id === id), (await s.pendingMutations(scope)).length,
+    ]));
+  }, cancelledWriteId), [[false, 0], [false, 0]], 'Account cancellation aborts XML, placement and outbox together');
+  assert.equal(await additionPage.locator('.revealed').count(), 0);
+  await uploadAddition('Addition scoped commit');
+  const committedId = await revealedAddition('Addition scoped commit');
+  assert.deepEqual(await additionPage.evaluate(async id => (await (await import('/src/lib/storage.ts')).pendingMutations('user:addition-destination')).map(m => [m.kind, m.id, m.baseRevision]).sort(), committedId), [
+    ['organization', `score.${committedId}`, 0], ['score', committedId, 0],
+  ], 'A successful account addition commits both ordinary mutations');
+  console.log('PASS library additions: nested/root upload, XML/MXL duplicates without moving, explicit/inherited trash restoration, invalid/missing folder and atomic storage failure, catalogue/drop/error-card parity, unchanged live studio, reveal/scroll/search/expiry/reduced motion/i18n, account/read/write and capture cancellation');
 
   const organizationContext = await isolatedContext(null, { hasTouch: true });
   await organizationContext.route('**/api/v1/**', route => route.fulfill({ json: { user: null, registration: 'open' } }));
@@ -1634,7 +1820,7 @@ try {
   }
   async function importOrganization(title) {
     await organizationPage.locator('input[type=file]').setInputFiles({ name: `${title}.musicxml`, mimeType: 'application/xml', buffer: Buffer.from(syntheticXML(title)) });
-    await organizationPage.waitForFunction(title => document.querySelector('h1')?.textContent === title && document.querySelector('.transport .play-button')?.disabled === false, title);
+    await organizationPage.locator('.library-tree .revealed').getByText(title, { exact: true }).waitFor();
     await openOrganizationLibrary();
     return organizationPage.evaluate(async title => (await (await import('/src/lib/storage.ts')).savedScores()).find(score => score.title === title).id, title);
   }
@@ -1669,8 +1855,8 @@ try {
   const alpha = await importOrganization('UI Alpha');
   await selectFolder(child);
   const needle = await importOrganization('UI Needle');
-  assert.equal(await folderNode(child).locator('> .tree-row .disclosure').getAttribute('aria-expanded'), 'false');
-  await toggleFolder(child); await fileNode(needle).waitFor();
+  assert.equal(await folderNode(child).locator('> .tree-row .disclosure').getAttribute('aria-expanded'), 'true', 'Import reveals the score in its folder');
+  await fileNode(needle).waitFor();
   await selectFolder(parent);
   const empty = await createOrganizationFolder('UI empty');
   await menuFor(folderNode(empty)); await folderNode(empty).getByRole('button', { name: 'Renommer le dossier', exact: true }).click();

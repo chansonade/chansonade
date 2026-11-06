@@ -574,14 +574,15 @@ export async function trashItem(kind: ItemKind, id: string, scope = activeScope)
     await writeResourceInTransaction(tx, 'organization', `${kind}.${id}`, { ...placement, trashedAt: placement.trashedAt ?? Date.now() }, scope);
   });
 }
+async function restoreItemInTransaction(tx: IDBTransaction, organization: Organization, kind: ItemKind, id: string, scope: string) {
+  const location = organization.classify(kind, id);
+  if (location.state !== 'trash') return;
+  const placement = await itemPlacement(tx, kind, id, scope);
+  const folder = location.folderId === null ? undefined : organization.folder(location.folderId);
+  await writeResourceInTransaction(tx, 'organization', `${kind}.${id}`, { ...placement, trashedAt: null, folderId: folder && !folder.trashed ? folder.id : null }, scope);
+}
 export async function restoreItem(kind: ItemKind, id: string, scope = activeScope): Promise<void> {
-  return changeOrganization(scope, async (tx, organization) => {
-    if (organization.classify(kind, id).state !== 'trash') return;
-    const placement = await itemPlacement(tx, kind, id, scope);
-    const folderId = organization.classify(kind, id).folderId;
-    const folder = folderId === null ? undefined : organization.folder(folderId);
-    await writeResourceInTransaction(tx, 'organization', `${kind}.${id}`, { ...placement, trashedAt: null, folderId: folder && !folder.trashed ? folder.id : null }, scope);
-  });
+  return changeOrganization(scope, (tx, organization) => restoreItemInTransaction(tx, organization, kind, id, scope));
 }
 async function deleteScoreInTransaction(tx: IDBTransaction, id: string, scope: string) {
   await writeResourceInTransaction(tx, 'score', id, null, scope);
@@ -623,6 +624,28 @@ export async function purgeTrash(selection: OrganizationTarget | 'all', scope = 
     }
   });
   changed(scope, 'write');
+}
+/** Add once, restore if needed, and place only new scores, in one transaction. */
+export async function addScoreToLibrary(score: SavedScore, folderId: string | null, scope: string, signal: AbortSignal): Promise<void> {
+  return changeOrganization(scope, async (tx, organization) => {
+    signal.throwIfAborted();
+    const abort = () => tx.abort();
+    const cleanup = () => signal.removeEventListener('abort', abort);
+    signal.addEventListener('abort', abort, { once: true });
+    tx.addEventListener('complete', cleanup, { once: true });
+    tx.addEventListener('abort', cleanup, { once: true });
+    const existing = await requestValue<LocalResource | undefined>(tx.objectStore('resources').get(key(scope, 'score', score.id)));
+    if (existing && !existing.deleted && existing.data) {
+      await restoreItemInTransaction(tx, organization, 'score', score.id, scope);
+      return;
+    }
+    await writeResourceInTransaction(tx, 'score', score.id, score, scope);
+    const placement = await itemPlacement(tx, 'score', score.id, scope);
+    const folder = folderId === null ? undefined : organization.folder(folderId);
+    await writeResourceInTransaction(tx, 'organization', `score.${score.id}`, {
+      ...placement, folderId: folder && !folder.trashed ? folder.id : null, trashedAt: null,
+    }, scope);
+  });
 }
 export function saveScore(score: SavedScore, scope = activeScope) { return writeResource('score', score.id, score, scope); }
 export function writeSettings(id: string, settings: PracticeSettings, scope = activeScope) { return writeResource('settings', id, settings, scope); }

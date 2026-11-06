@@ -1,4 +1,5 @@
 <script module lang="ts">
+  export type LibraryReveal = { id: string };
   export type LibraryNavigation = { current: string; expanded: string[] };
 </script>
 
@@ -30,7 +31,7 @@
     type SavedScore,
   } from './storage';
   import type { Organization, OrganizationTarget } from './organization';
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import MoveItem from './MoveItem.svelte';
   import LibraryDialog from './LibraryDialog.svelte';
   type FileEntry = { kind: 'score' | 'take'; id: string; title: string; subtitle: string };
@@ -42,6 +43,7 @@
     currentId,
     navigation = $bindable(),
     search = $bindable(''),
+    reveal = $bindable<LibraryReveal | null>(null),
     blocked = false,
     onopen,
     onerror,
@@ -53,6 +55,7 @@
     currentId: string;
     navigation: LibraryNavigation;
     search?: string;
+    reveal?: LibraryReveal | null;
     blocked?: boolean;
     onopen: (score: SavedScore) => void;
     onerror: (message: string) => void;
@@ -108,27 +111,57 @@
   const matching = $derived(
     active.filter((score) => matchesSearch(search, score.title, score.composer)),
   );
+  function addAncestors(ids: Set<string>, id: string | null) {
+    while (id !== null) {
+      ids.add(id);
+      id = organization.folder(id)?.parentId ?? null;
+    }
+  }
   const visibleFolders = $derived.by(() => {
     const visible = new Set<string>();
-    const add = (id: string | null) => {
-      while (id !== null) {
-        visible.add(id);
-        id = organization.folder(id)?.parentId ?? null;
-      }
-    };
     for (const folder of destinations)
-      if (!search.trim() || matchesSearch(search, folder.data.name)) add(folder.id);
-    for (const score of matching) add(organization.classify('score', score.id).folderId);
+      if (!search.trim() || matchesSearch(search, folder.data.name)) addAncestors(visible, folder.id);
+    for (const score of matching) addAncestors(visible, organization.classify('score', score.id).folderId);
     return visible;
   });
-  onMount(() =>
-    subscribeStorage((event) => {
-      if (event.reason === 'scope') {
-        menu = null;
-        announce('');
-      }
-    }),
-  );
+  let revealed = $state.raw<LibraryReveal | null>(null);
+  let revealTimer: ReturnType<typeof setTimeout>;
+  function clearReveal() {
+    clearTimeout(revealTimer);
+    revealed = null;
+  }
+  const revealReady = $derived(!!reveal && active.some(score => score.id === reveal?.id));
+  $effect(() => {
+    const request = reveal;
+    if (!request || !revealReady) return;
+    untrack(() => {
+      const score = active.find(score => score.id === request.id)!;
+      const folderId = organization.classify('score', score.id).folderId;
+      const expanded = new Set(navigation.expanded);
+      addAncestors(expanded, folderId);
+      if (folderId === null) expanded.add('unfiled');
+      // Consume the navigation request; only its temporary visual feedback remains.
+      reveal = null;
+      clearReveal();
+      revealed = request;
+      search = '';
+      menu = null;
+      navigation = { current: folderId ?? 'unfiled', expanded: [...expanded] };
+      revealTimer = setTimeout(clearReveal, 4000);
+      void tick().then(() => {
+        if (revealed !== request || scope !== storageScope() || !tree?.isConnected) return;
+        tree.querySelector(`[data-kind="score"][data-id="${CSS.escape(request.id)}"]`)
+          ?.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+        announce('Partition « {title} » affichée dans votre bibliothèque.', { title: score.title });
+      });
+    });
+  });
+  onMount(() => {
+    const stop = subscribeStorage(event => {
+      if (event.reason === 'scope') { clearReveal(); menu = null; announce(''); }
+    });
+    return () => { clearReveal(); stop(); };
+  });
   function select(id: string) {
     navigation = { ...navigation, current: id };
     if (id === 'trash') search = '';
@@ -288,7 +321,13 @@
   </div>
 {/snippet}
 {#snippet fileRow(file: FileEntry, depth: number, section: 'library' | 'trash')}
-  <li class="file-entry" data-kind={file.kind} data-id={file.id} style:--depth={Math.min(depth, 3)}>
+  <li
+    class="file-entry"
+    class:revealed={section === 'library' && revealed?.id === file.id}
+    data-kind={file.kind}
+    data-id={file.id}
+    style:--depth={Math.min(depth, 3)}
+  >
     <div class="tree-row saved-piece">
       {#if section === 'library'}
         <button
@@ -464,7 +503,9 @@
             : organization.path(navigation.current) || $t('Racine de la bibliothèque'),
     })}
   </p>
-  <p class="sr-only" role="status">{$t(notice.key, notice.params)}</p>
+  <p class="sr-only" role="status">
+    {#key notice}{$t(notice.key, notice.params)}{/key}
+  </p>
   <nav aria-label={$t('Bibliothèque personnelle')}>
     {#if navigation.current !== 'trash'}
       <ul>
@@ -780,5 +821,19 @@
     color: var(--ink);
     box-shadow: 0 6px 24px #0003;
     font-size: 13px;
+  }
+  .revealed > .tree-row {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    border-radius: 6px;
+    background: var(--accent-soft);
+    animation: reveal-score 600ms ease-out;
+  }
+  @keyframes reveal-score {
+    from { box-shadow: 0 0 0 5px var(--accent-soft); }
+    to { box-shadow: 0 0 0 0 transparent; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .revealed > .tree-row { animation: none; }
   }
 </style>

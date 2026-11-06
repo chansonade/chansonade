@@ -1,6 +1,8 @@
 // French source text is the stable key. Musical titles, lyrics and user data
 // remain unchanged; named placeholders are interpolated by the i18n runtime.
 const messages: readonly [string, string, string, string][] = [
+  ["Partition « {title} » affichée dans votre bibliothèque.", "Score “{title}” shown in your library.", "Partitur „{title}“ in deiner Bibliothek angezeigt.", "Partituur ‘{title}’ getoond in je bibliotheek."],
+  ["Le navigateur n’a pas pu ajouter cette partition à la bibliothèque.", "The browser could not add this score to the library.", "Der Browser konnte diese Partitur nicht zur Bibliothek hinzufügen.", "De browser kon deze partituur niet aan de bibliotheek toevoegen."],
   ["Glisser « {title} » vers un dossier", "Drag “{title}” to a folder", "„{title}“ in einen Ordner ziehen", "‘{title}’ naar een map slepen"],
   ["Glissez la poignée vers un dossier, ou utilisez « Déplacer vers… » dans les actions.", "Drag the handle to a folder, or choose “Move to…” in the actions.", "Ziehe den Griff in einen Ordner oder wähle „Verschieben nach…“ in den Aktionen.", "Sleep de greep naar een map of kies ‘Verplaatsen naar…’ bij de acties."],
   ["Glissez « {title} » vers un dossier.", "Drag “{title}” to a folder.", "Ziehe „{title}“ in einen Ordner.", "Sleep ‘{title}’ naar een map."],
@@ -39,10 +41,7 @@ const messages: readonly [string, string, string, string][] = [
   ["Impossible de charger cette partition.", "This score could not be loaded.", "Diese Partitur konnte nicht geladen werden.", "Deze partituur kon niet worden geladen."],
   ["Partition indisponible.", "Score unavailable.", "Partitur nicht verfügbar.", "Partituur niet beschikbaar."],
   ["La partition ne correspond pas au catalogue.", "The score does not match the catalogue.", "Die Partitur stimmt nicht mit dem Katalog überein.", "De partituur komt niet overeen met de catalogus."],
-  ["Partition ajoutée à votre bibliothèque.", "Score added to your library.", "Partitur zur Bibliothek hinzugefügt.", "Partituur aan je bibliotheek toegevoegd."],
   ["Impossible d’ajouter cette partition.", "This score could not be added.", "Diese Partitur konnte nicht hinzugefügt werden.", "Deze partituur kon niet worden toegevoegd."],
-  ["Le compte a changé. Relancez l’import dans la bibliothèque souhaitée.", "The account has changed. Import again in the library you want to use.", "Das Konto hat sich geändert. Starte den Import in der gewünschten Bibliothek erneut.", "Het account is gewijzigd. Importeer opnieuw in de gewenste bibliotheek."],
-  ["Partition ouverte. Le navigateur n’a pas pu la conserver.", "Score opened. The browser could not save it.", "Partitur geöffnet. Der Browser konnte sie nicht speichern.", "Partituur geopend. De browser kon deze niet opslaan."],
   ["Le piano est indisponible.", "The piano is unavailable.", "Das Klavier ist nicht verfügbar.", "De piano is niet beschikbaar."],
   ["Cliquez la première note du passage, puis la dernière.", "Click the first note of the passage, then the last.", "Klicke auf die erste Note der Passage und dann auf die letzte.", "Klik op de eerste noot van de passage en daarna op de laatste."],
   ["Passage prêt à répéter.", "Passage ready to repeat.", "Passage zum Wiederholen bereit.", "Passage klaar om te herhalen."],

@@ -13,9 +13,9 @@
   import { t, locale, noteName } from './lib/i18n';
   import TakePanel from './lib/TakePanel.svelte';
   import { takeMoment, takePitchSamples, takePitchCount, takeTraceStarts } from './lib/take-playback';
-  import LibraryTree, { type LibraryNavigation } from './lib/LibraryTree.svelte';
+  import LibraryTree, { type LibraryNavigation, type LibraryReveal } from './lib/LibraryTree.svelte';
   import { publicCatalog, catalogGroups, matchesSearch, type CatalogPiece, type CatalogGroup } from './lib/catalog';
-  import { readOrganization, organizationTakes, moveItem, restoreItem } from './lib/storage';
+  import { readOrganization, organizationTakes, addScoreToLibrary } from './lib/storage';
   import { projectOrganization, type Organization } from './lib/organization';
   import { measuresInLoop, canonicalLoopBounds } from './lib/loop';
   import { syncState, startSync, setTakeSyncPaused } from './lib/sync';
@@ -25,7 +25,7 @@
   import { finishCapturedTake, takeArchive, TakeMetadataBudget, type TakeCapture } from './lib/take-session';
   import { requestPersistentStorage } from './lib/storage-health';
   import { readPreference, writePreference } from './lib/preferences';
-  import { savedScores, saveScore, scoreId, readSettings, writeSettings, storageScope, subscribeStorage, latestTake as loadLatestTake, type SavedScore, type PracticeSettings, type RecordedTake, type TakePitch, type TakeTransport } from './lib/storage';
+  import { savedScores, scoreId, readSettings, writeSettings, storageScope, subscribeStorage, latestTake as loadLatestTake, type SavedScore, type PracticeSettings, type RecordedTake, type TakePitch, type TakeTransport } from './lib/storage';
 
   let engine: Score;
   const audio = new AudioPlayer();
@@ -73,7 +73,8 @@
   const trashCount = $derived(organization.trash([...customScores.map(score => ({ kind: 'score' as const, id: score.id })), ...libraryTakes.map(take => ({ kind: 'take' as const, id: take.id }))]).length);
   let librarySearch = $state('');
   let catalogGroup = $state<CatalogGroup>('children-fr');
-  let addingPublic = $state(false);
+  let libraryAddition = $state.raw<{ scope: string; folderId: string | null; controller: AbortController } | null>(null);
+  let libraryReveal = $state.raw<LibraryReveal | null>(null);
   const filteredPublic = $derived(publicCatalog.filter(piece => piece.group === catalogGroup && matchesSearch(librarySearch,piece.title,piece.composer)));
   const currentPublicPiece = $derived(publicCatalog.find(piece => piece.id === currentId));
   let libraryOpen = $state(false);
@@ -186,7 +187,6 @@
   type ScoreSource =
     | { kind: 'catalog'; example: typeof examples[number] }
     | { kind: 'saved'; score: SavedScore }
-    | { kind: 'file'; file: File; folderId: string | null }
     | { kind: 'take'; take: RecordedTake }
     | { kind: 'library'; lastId: string | null; requestedId?: string | null };
   type Opening = { scope: string; source: ScoreSource };
@@ -299,6 +299,7 @@
     // The request itself is the generation: reserve it before the first await,
     // including a deferred account switch or the initial library lookup.
     const request = { scope: storageScope(), source };
+    if (source.kind !== 'library') libraryOpen = false;
     opening = request;
     ++renderRevision;
     clearTimeout(layoutTimer);
@@ -318,8 +319,7 @@
       if (!source) { clearAccountDocument(request.scope); return; }
       const document = yield* readScoreDocument(source, request.scope);
       yield* installScoreDocument(source, document, request.scope);
-      if (source.kind === 'file') yield* saveImportedScore(source, document, request.scope);
-      else if (source.kind === 'take') yield* startScoreReplay(source.take);
+      if (source.kind === 'take') yield* startScoreReplay(source.take);
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause);
     } finally {
@@ -353,12 +353,6 @@
       if (!response.ok) throw new Error('Impossible de charger cette partition.');
       xml = readMusicXML(yield* openingWait(response.arrayBuffer()));
       info = source.example;
-    } else if (source.kind === 'file') {
-      void requestPersistentStorage();
-      if (source.file.size > MAX_SCORE_ARCHIVE_BYTES) throw new Error('L’archive MXL dépasse la limite de 10 Mio.');
-      xml = readMusicXML(yield* openingWait(source.file.arrayBuffer()));
-      info = metadata(xml, source.file.name);
-      checkScoreMetadata(info);
     } else {
       if (micActive) { pitch.stop(); micActive = false; pitchResult = null; }
       xml = source.take.scoreXML;
@@ -400,7 +394,7 @@
     yield* restorePractice(id, scope);
     renderedSignature = requestedSignature;
     yield* installPages(result.pages);
-    libraryOpen = false; busy = false;
+    busy = false;
     if (`${mode}:${viewportWidth}:${viewportHeight}:${zoom}` !== requestedSignature) yield* layoutScore(opening);
     audioBusy = true; status = 'Préparation des instruments…';
     yield* openingWait(audio.load(music.midi));
@@ -408,16 +402,6 @@
     yield* hydratePractice(scope);
     duration = audio.duration || music.duration;
     writePreference('chansonade.last', id);
-  }
-
-  function* saveImportedScore(source: Extract<ScoreSource, { kind: 'file' }>, document: ScoreDocument, scope: string): OpeningSteps {
-    const { id, info, xml } = document;
-    try {
-      yield* openingWait(saveScore({ id, ...info, xml, added: Date.now() }, scope));
-      yield* openingWait(restoreItem('score', id, scope));
-      if (source.folderId) yield* openingWait(moveItem('score', id, source.folderId, scope));
-      yield* openingWait(reloadLibrary(scope));
-    } catch { notify('Partition ouverte. Le navigateur n’a pas pu la conserver.'); }
   }
 
   function* startScoreReplay(take: RecordedTake): OpeningSteps {
@@ -432,29 +416,63 @@
     catch { notify('Appuyez sur Lecture pour réécouter cet essai.'); }
   }
 
-  async function addPublicPiece(piece:CatalogPiece) {
-    if (addingPublic || takePhase !== 'idle') return;
-    const scope = storageScope(); addingPublic = true;
-    try {
-      checkScoreMetadata(piece);
-      let xml = currentId === piece.id ? currentXML : '';
-      if (!xml) { const response = await fetch(`${import.meta.env.BASE_URL}scores/${piece.file}`); if(!response.ok) throw new Error('Partition indisponible.'); xml = readMusicXML(await response.arrayBuffer()); }
-      if (scope !== storageScope()) return;
-      if (await scoreId(xml) !== piece.id) throw new Error('La partition ne correspond pas au catalogue.');
-      if (!(await savedScores(scope)).some(score => score.id === piece.id)) await saveScore({id:piece.id,title:piece.title,composer:piece.composer,xml,added:Date.now()},scope);
-      await restoreItem('score',piece.id,scope);
-      if (organization.destinations().some(folder => folder.id === libraryNavigation.current)) await moveItem('score',piece.id,libraryNavigation.current,scope);
-      await reloadLibrary(scope);
-      notify('Partition ajoutée à votre bibliothèque.');
-    } catch(cause) { notify(cause instanceof Error ? cause.message : 'Impossible d’ajouter cette partition.'); }
-    finally { addingPublic = false; }
+  type LibrarySource = { kind: 'file'; file: File } | { kind: 'catalog'; piece: CatalogPiece };
+  function cancelLibraryAddition() {
+    libraryAddition?.controller.abort();
+    libraryAddition = null;
   }
-
+  async function readLibraryScore(source: LibrarySource, signal: AbortSignal): Promise<SavedScore> {
+    let xml: string, info: ScoreDocument['info'];
+    if (source.kind === 'file') {
+      if (source.file.size > MAX_SCORE_ARCHIVE_BYTES) throw new Error('L’archive MXL dépasse la limite de 10 Mio.');
+      const buffer = await source.file.arrayBuffer();
+      signal.throwIfAborted();
+      xml = readMusicXML(buffer);
+      info = metadata(xml, source.file.name);
+    } else {
+      const { piece } = source;
+      xml = currentId === piece.id ? currentXML : '';
+      if (!xml) {
+        const response = await fetch(`${import.meta.env.BASE_URL}scores/${piece.file}`, { signal });
+        if (!response.ok) throw new Error('Partition indisponible.');
+        xml = readMusicXML(await response.arrayBuffer());
+      }
+      info = piece;
+    }
+    checkScoreMetadata(info);
+    const id = await scoreId(xml);
+    if (source.kind === 'catalog' && id !== source.piece.id) throw new Error('La partition ne correspond pas au catalogue.');
+    return { id, title: info.title, composer: info.composer, xml, added: Date.now() };
+  }
+  async function addToLibrary(source: LibrarySource) {
+    if (libraryAddition || takePhase !== 'idle') return;
+    const request = {
+      scope: storageScope(),
+      folderId: organization.destinations().find(folder => folder.id === libraryNavigation.current)?.id ?? null,
+      controller: new AbortController(),
+    };
+    libraryAddition = request;
+    const { signal } = request.controller;
+    void requestPersistentStorage();
+    try {
+      const score = await readLibraryScore(source, signal);
+      signal.throwIfAborted();
+      await addScoreToLibrary(score, request.folderId, request.scope, signal);
+      await reloadLibrary(request.scope);
+      signal.throwIfAborted();
+      libraryTab = 'personal'; libraryTabChosen = true; libraryOpen = true;
+      libraryReveal = { id: score.id };
+    } catch (cause) {
+      if (!signal.aborted) notify(cause instanceof DOMException
+        ? 'Le navigateur n’a pas pu ajouter cette partition à la bibliothèque.'
+        : cause instanceof Error ? cause.message : 'Impossible d’ajouter cette partition.');
+    } finally {
+      if (libraryAddition === request) libraryAddition = null;
+    }
+  }
   function importFile(file?: File) {
-    if (!file) return;
-    const folderId = organization.destinations().find(folder => folder.id === libraryNavigation.current)?.id || null;
     if (fileInput) fileInput.value = '';
-    return chooseScore({ kind: 'file', file, folderId });
+    if (file) return addToLibrary({ kind: 'file', file });
   }
 
   function* installPages(next: string[]): OpeningSteps {
@@ -972,7 +990,10 @@
     practiceDirty = false; practiceTouched = false; documentStarted = false;
     clearPitchTrace(); captureTimeline.reset();
   }
-  $effect(() => { setTakeSyncPaused(takePhase !== 'idle'); });
+  $effect(() => {
+    setTakeSyncPaused(takePhase !== 'idle');
+    if (takePhase !== 'idle') cancelLibraryAddition();
+  });
   $effect(() => {
     if (pendingAccountOpening && takePhase === 'idle') {
       const request = pendingAccountOpening;
@@ -1016,6 +1037,7 @@
     const stopStorage = subscribeStorage((event) => {
       if (event.scope !== storageScope()) return;
       if (event.reason === 'scope') {
+        cancelLibraryAddition(); libraryReveal = null;
         stopReplay(); showTake(null); takeScope = event.scope;
         customScores = []; libraryTakes = []; organization = projectOrganization(); libraryScope = event.scope;
         libraryNavigation = { current: 'all', expanded: ['unfiled'] }; librarySearch = ''; libraryTabChosen = false;
@@ -1033,6 +1055,7 @@
     if (import.meta.env.PROD && 'serviceWorker' in navigator) void navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL }).catch(() => {});
     return () => {
       disposed = true;
+      cancelLibraryAddition();
       stopSync(); stopStorage();
       cancelTakePreparation();
       savePractice();
@@ -1064,6 +1087,7 @@
     type="file"
     accept=".mxl,.musicxml,.xml"
     bind:this={fileInput}
+    disabled={!!libraryAddition || takePhase !== 'idle'}
     onchange={(e) => void importFile(e.currentTarget.files?.[0])}
     aria-label={$t("Importer une partition")}
   />
@@ -1115,10 +1139,10 @@
           {#if !activeScores.some(score => score.id === currentId)}
             <button
               class="add-current-score"
-              disabled={addingPublic || takePhase !== 'idle'}
+              disabled={!!libraryAddition || takePhase !== 'idle'}
               aria-label={$t('Ajouter à mes partitions')}
               title={$t('Ajouter à mes partitions')}
-              onclick={() => void addPublicPiece(currentPublicPiece!)}
+              onclick={() => void addToLibrary({ kind: 'catalog', piece: currentPublicPiece! })}
             >
               <Plus size={13}
               /><span>{$t('Ajouter à mes partitions')}</span>
@@ -1188,13 +1212,13 @@
         />
         {/if}
         {#if libraryTab === 'personal'}
-          <button class="import-button" disabled={libraryNavigation.current === 'trash'} onclick={() => fileInput.click()}>
+          <button class="import-button" disabled={!!libraryAddition || takePhase !== 'idle' || libraryNavigation.current === 'trash'} onclick={() => fileInput.click()}>
             <Plus size={17} /> {$t("Importer une partition")}
             <span>XML</span>
           </button>
           {#key libraryScope}
             <LibraryTree {organization} scores={customScores} takes={libraryTakes} scope={libraryScope} {currentId}
-              bind:navigation={libraryNavigation} bind:search={librarySearch} blocked={takePhase !== 'idle'}
+              bind:navigation={libraryNavigation} bind:search={librarySearch} bind:reveal={libraryReveal} blocked={takePhase !== 'idle'}
               onopen={openSavedScore} onerror={notify} />
           {/key}
         {:else}
@@ -1249,8 +1273,8 @@
               ><div class="catalog-piece-actions">
                 <span>{piece.license === 'CC0-1.0' ? 'CC0' : 'CC BY-SA'}</span
                 ><button
-                  disabled={addingPublic || takePhase !== 'idle' || activeScores.some(score => score.id === piece.id)}
-                  onclick={() => void addPublicPiece(piece)}
+                  disabled={!!libraryAddition || takePhase !== 'idle' || activeScores.some(score => score.id === piece.id)}
+                  onclick={() => void addToLibrary({ kind: 'catalog', piece })}
                 >
                   {#if activeScores.some(score => score.id === piece.id)}
                     <Check size={13} />
@@ -1543,7 +1567,8 @@
             ><p>{$t(error)}</p
             ><button
               class="primary-button"
-              onclick={() => fileInput.click()}>{$t("Ouvrir une partition")}</button
+              disabled={!!libraryAddition || takePhase !== 'idle'}
+              onclick={() => fileInput.click()}>{$t("Importer une partition")}</button
             ><button class="text-button" onclick={() => error = ''}>{$t("Fermer")}</button>
           </div>
         {/if}

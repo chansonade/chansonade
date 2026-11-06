@@ -169,6 +169,29 @@ Les WAV restent immuables et les déplacements ne les retransfèrent pas. Les do
 publics restent un catalogue distinct en lecture seule. Les ajouts publics utilisent
 le SHA-256 du XML, identique aux imports privés, sans relancer le lecteur.
 
+L'import d'un fichier et l'ajout du catalogue partagent `addToLibrary`, séparé de
+`chooseScore` : lecture bornée XML/MXL, métadonnées bornées et SHA-256, puis
+`addScoreToLibrary` écrit la partition et son placement dans une seule transaction
+avec leurs mutations. Une nouvelle partition rejoint le dossier courant capturé
+au choix, ou « Non classés » si ce dossier n'est plus actif à l'écriture. Un
+contenu déjà présent conserve son XML, ses métadonnées, ses réglages et son dossier.
+Une copie en corbeille est restaurée seule : dossier actif conservé, sinon
+« Non classés ». Ces opérations ne gravent rien et ne changent ni le transport,
+ni l'audio, ni les réglages du studio. Le compte et le cycle de l'ajout sont liés
+par un AbortSignal : changement de compte, capture ou démontage annulent les
+attentes et la transaction encore en cours.
+
+Après l'ajout, l'onglet personnel reçoit une demande de révélation éphémère,
+consommée par `LibraryTree` : recherche effacée explicitement, dossier sélectionné,
+ancêtres dépliés, ligne défilée et surlignée quatre secondes, avec annonce traduite.
+La demande est consommée dès la navigation ; seul son retour visuel reste quatre
+secondes, avec minuterie nettoyée au démontage. Une réouverture de la bibliothèque
+ne rejoue pas une ancienne révélation. Le
+surlignage respecte la réduction des animations. Seul un choix explicite de la
+ligne ouvre ensuite la partition dans le studio. La fermeture de la bibliothèque
+est liée à ce choix explicite, avant les attentes du studio ; une ouverture
+antérieure qui se termine ne masque pas une nouvelle révélation.
+
 Le projet indépendant `chansonade-site` génère les pages publiques sans JavaScript.
 Il ne lit que le manifeste et les assets publics comme entrées de build ; aucun
 module interne du client ou du serveur n’est importé. `VITE_CATALOGUE_URL` rend
