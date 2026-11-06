@@ -5,20 +5,33 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { createServer as createPortProbe } from 'node:net';
+import { zipSync, strToU8 } from 'fflate';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { build, preview } from 'vite';
+import { build, createServer, preview } from 'vite';
 import { chromium } from 'playwright';
 import { copyPublicSource, publicScoreFiles } from './public-source.mjs';
 
-// check-client's development server sets NODE_ENV before spawning its checks.
-// Exercise the same production compilation as `vite build`.
-process.env.NODE_ENV = 'production';
 const run = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
 const temporary = await mkdtemp(path.join(tmpdir(), 'chansonade-distribution-'));
 const fixture = path.join(temporary, 'app');
-let browser, context, server;
+let browser, context, server, development;
+async function availablePort() {
+  const probe = createPortProbe();
+  await new Promise((resolve, reject) => { probe.once('error', reject); probe.listen(0, '127.0.0.1', resolve); });
+  const port = probe.address().port;
+  await new Promise(resolve => probe.close(resolve));
+  return port;
+}
+async function excludesMarker(directory, marker) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const file = path.join(directory, entry.name);
+    if (entry.isDirectory()) await excludesMarker(file, marker);
+    else assert(!(await readFile(file)).includes(Buffer.from(marker)), `Private fixture leaked into ${file}`);
+  }
+}
 async function closePreview() {
   await context?.close(); context = null;
   if (server) await new Promise((resolve, reject) => server.httpServer.close(error => error ? reject(error) : resolve()));
@@ -48,7 +61,55 @@ try {
   await copyPublicSource(fixture, snapshot);
   assert.deepEqual((await readdir(path.join(snapshot, 'public/scores'))).sort(), allowed, 'Source offer only contains manifest-listed scores');
 
+  const localDirectory = path.join(fixture, 'local-scores');
+  const localMarker = randomUUID();
+  const localXML = xml.replace(title, localMarker);
+  const localEntries = ['synthetic local.musicxml', 'synthetic.xml', 'synthetic.mxl'].map(file => ({ file, title: localMarker, subtitle: 'Fixture', composer: 'Synthetic local', period: '' }));
+  const localBytes = [Buffer.from(localXML), Buffer.from(localXML), zipSync({ 'score.musicxml': strToU8(localXML) })];
+  async function checkDevelopment(base, entries) {
+    development = await createServer({ root: fixture, configFile: path.join(fixture, 'vite.config.ts'), base, cacheDir: path.join(temporary, 'dev-cache'), logLevel: 'error', server: { host: '127.0.0.1', port: await availablePort(), strictPort: true, open: false } });
+    try {
+      await development.listen();
+      const url = `http://127.0.0.1:${development.httpServer.address().port}${base}`;
+      context = await browser.newContext({ locale: 'fr-BE', serviceWorkers: 'block' });
+      await context.route('**/api/v1/**', route => route.fulfill({ json: { user: null, registration: 'open' } }));
+      if (entries.length) await context.addInitScript(file => localStorage.setItem('chansonade.last', file), entries.at(-1).file);
+      const page = await context.newPage();
+      const errors = []; page.on('pageerror', error => errors.push(error.message));
+      await page.goto(url);
+      await page.waitForFunction(title => document.querySelector('h1')?.textContent === title && document.querySelector('.transport .play-button')?.disabled === false, entries.length ? localMarker : title);
+      assert.deepEqual(await page.evaluate(async base => (await import(`${base}src/lib/score.ts`)).examples.map(({ file, title }) => ({ file, title })), base), [entry, ...entries].map(({ file, title }) => ({ file, title })));
+      for (let i = 0; i < entries.length; i++) {
+        const response = await fetch(`${url}scores/${encodeURIComponent(entries[i].file)}`);
+        assert.equal(response.status, 200);
+        assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from(localBytes[i]));
+      }
+      for (const name of ['manifest.json', 'unlisted-local.musicxml']) {
+        const response = await fetch(`${url}scores/${name}`);
+        assert(!(await response.text()).includes(localMarker), 'Only manifest-listed local scores may be served');
+      }
+      assert.deepEqual(errors, []);
+    } finally {
+      await context?.close(); context = null;
+      await development.close(); development = null;
+    }
+  }
+  await checkDevelopment('/', []);
+  await mkdir(localDirectory);
+  await writeFile(path.join(localDirectory, 'manifest.json'), JSON.stringify(localEntries));
+  for (let i = 0; i < localEntries.length; i++) await writeFile(path.join(localDirectory, localEntries[i].file), localBytes[i]);
+  await writeFile(path.join(localDirectory, 'unlisted-local.musicxml'), localMarker);
+  for (const base of ['/', '/test/chansonade/']) await checkDevelopment(base, localEntries);
+  await copyPublicSource(fixture, snapshot);
+  assert(!(await readdir(snapshot)).includes('local-scores'), 'The local manifest and corpus are excluded from the source offer');
+  await excludesMarker(snapshot, localMarker);
+  console.log('PASS local scores: absent/valid manifest, XML/MXL, encoded filenames, remembered opening, base paths and source exclusion');
+
+  // check-client's development server sets NODE_ENV before spawning its checks.
+  // Exercise the same production compilation as `vite build`.
+  process.env.NODE_ENV = 'production';
   for (const base of ['/', '/test/chansonade/']) {
+    if (base !== '/') await writeFile(path.join(localDirectory, 'manifest.json'), '{ malformed private manifest');
     await build({ root: fixture, configFile: path.join(fixture, 'vite.config.ts'), base, cacheDir: path.join(temporary, 'vite-cache'), logLevel: 'error', build: { outDir: 'dist', emptyOutDir: true } });
     const dist = path.join(fixture, 'dist');
     assert.deepEqual((await readdir(path.join(dist, 'scores'))).sort(), allowed, 'Vite must not copy unlisted scores, folders or symlinks');
@@ -59,8 +120,9 @@ try {
     const offline = () => run(process.execPath, [path.join(fixture, 'scripts/build-offline.mjs')], { cwd: fixture });
     await mkdir(path.join(dist, 'source')); await writeFile(path.join(dist, 'source/fixture.zip'), marker);
     await offline();
+    await excludesMarker(dist, localMarker);
     let apiSequence = 0, workerAPIRequests = 0;
-    server = await preview({ root: fixture, configFile: path.join(fixture, 'vite.config.ts'), base, logLevel: 'error', preview: { host: '127.0.0.1', port: 0, strictPort: false, open: false }, plugins: [{
+    server = await preview({ root: fixture, configFile: path.join(fixture, 'vite.config.ts'), base, logLevel: 'error', preview: { host: '127.0.0.1', port: await availablePort(), strictPort: true, open: false }, plugins: [{
       name: 'synthetic-api',
       configurePreviewServer(previewServer) {
         previewServer.middlewares.use((request, response, next) => {
@@ -116,6 +178,7 @@ try {
   console.log('PASS distribution: malformed/duplicate/traversal/missing catalogue entries and listed symlinks rejected');
 } finally {
   await closePreview();
+  await development?.close();
   await browser?.close();
   await rm(temporary, { recursive: true, force: true });
 }

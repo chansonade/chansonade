@@ -28,12 +28,9 @@ export class AudioPlayer {
   private destroyed = false;
 
   get context() { return this.audioContext; }
-  get ready() { return this.loaded; }
   get ended() { return this.loaded && this.finished; }
   get playing() { return this.loaded && !!this.sequencer && !this.sequencer.paused; }
   get duration() { return this.loaded ? this.sequencer?.duration ?? 0 : 0; }
-  get currentTempo() { return (this.sequencer?.currentTempo ?? 120) * this.requestedRate; }
-  get rate() { return this.requestedRate; }
 
   get time() {
     if (!this.loaded || !this.sequencer) return 0;
@@ -284,10 +281,6 @@ export class AudioPlayer {
   setTranspose(channel: number, semitones: number) {
     this.stopPreview();
     this.synth?.midiChannels[channel]?.setSystemParameter('keyShift', Math.round(clamp(semitones, -48, 48)));
-  }
-
-  setGain(gain: number) {
-    this.synth?.setSystemParameter('gain', clamp(gain, 0, 2));
   }
 
   private async initializePiano() {

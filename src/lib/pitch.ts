@@ -46,11 +46,6 @@ type CaptureMessage =
   | { type: 'recording-chunk'; id: number; samples: Float32Array }
   | ({ type: 'recording-stopped'; id: number; duration: number; samples: number; reason?: 'manual' | 'limit' } & RecordingStart);
 
-/** Fractional MIDI pitch; use Math.round() for the nearest note. */
-export function frequencyToMidi(frequency: number): number {
-  return frequency > 0 ? 69 + 12 * Math.log2(frequency / 440) : -1;
-}
-
 // A shared audio context can outlive several microphone sessions. Registering
 // the same processor again would fail, so load its module once per context.
 const captureModules = new WeakMap<AudioContext, Promise<void>>();

@@ -53,13 +53,12 @@ Les nouveaux arrangements de comptines de Chansonade et les éditions OpenScore
 retenues sont distribués sous CC0. L'édition « Une souris verte » conserve
 explicitement sa licence CC BY-SA 4.0 décrite ci-dessous.
 
-Les six anciens fichiers MXL de travail proviennent du dossier `examples/` du
-projet Scorpus voisin. Ils contiennent des œuvres de Puccini, Tosti, Mozart et
-Bellini, avec des mentions de droits et de provenance hétérogènes qui ne
-constituent pas une autorisation générale de redistribution. Ils restent dans
-`local-scores/` pour les essais locaux et sont exclus du site de production et
-de l'archive source publique. Les partitions personnelles importées ne sont
-jamais ajoutées aux assets publics ni à l'offre de sources du client.
+Un corpus de travail privé peut être placé dans `local-scores/` et décrit par
+son manifeste ignoré (voir [CONTRIBUTING.md](CONTRIBUTING.md)). Ses droits ne
+permettent pas de le redistribuer : il sert uniquement aux essais locaux et
+reste exclu du site de production et de l'archive source publique. Les
+partitions personnelles importées ne sont jamais ajoutées aux assets publics ni
+à l'offre de sources du client.
 
 `une-souris-verte-chant-piano.musicxml` est un arrangement de travail créé pour Chansonade : mélodie et paroles traditionnelles, transcription adaptée du code LilyPond de la section « Mélodie » de [Wikipédia](https://fr.wikipedia.org/wiki/Une_souris_verte_(chanson)), accompagnement de piano original simple (accords sol/do/ré). Le premier couplet est repris, avec un silence de noire final à la place de l’anacrouse du couplet suivant. Cette adaptation et l’accompagnement sont distribués sous [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/). L’attribution et la source figurent aussi dans le fichier MusicXML.
 

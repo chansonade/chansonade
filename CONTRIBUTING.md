@@ -19,6 +19,28 @@ et sans serveur de synchronisation. Utiliser la partition publique **Une souris
 verte** ou un fichier dont vous pouvez partager les droits. Le corpus privé
 éventuellement présent dans `local-scores/` n'est pas nécessaire pour contribuer.
 
+Pour ajouter un corpus local de développement, créer `local-scores/manifest.json`
+avec une liste d'entrées de cette forme (fichiers `.musicxml`, `.xml` ou `.mxl`
+placés directement dans `local-scores/`) :
+
+```json
+[
+  {
+    "file": "exercice-local.musicxml",
+    "title": "Exercice local",
+    "subtitle": "Voix et piano",
+    "composer": "Compositeur local",
+    "period": ""
+  }
+]
+```
+
+Les cinq champs sont des chaînes ; chaque nom de fichier doit être unique et ne
+contenir aucun chemin. Le serveur lit ce manifeste à son démarrage : le relancer
+après une modification. Sans manifeste, seul le catalogue public est proposé.
+Le manifeste et les partitions locales restent ignorés par Git et exclus des
+builds et offres source. Ne jamais les commiter.
+
 ## Vérifier une modification
 
 ```sh

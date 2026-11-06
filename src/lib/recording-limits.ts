@@ -5,6 +5,3 @@ export function recordingMaxSamples(sampleRate: number): number {
   if (!Number.isFinite(sampleRate) || sampleRate <= 0) throw new Error('Fréquence d’échantillonnage invalide.');
   return Math.min(Math.floor(sampleRate * RECORDING_MAX_SECONDS), Math.floor((RECORDING_MAX_WAV_BYTES - 45) / 2));
 }
-export function recordingMaxSeconds(sampleRate: number): number {
-  return recordingMaxSamples(sampleRate) / sampleRate;
-}

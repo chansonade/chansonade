@@ -1,5 +1,6 @@
 import { alignNoteTimings } from './loop';
 import { publicCatalog } from './catalog';
+import localScores from 'virtual:local-scores';
 import { checkScoreXML } from './score-import';
 export { readMusicXML } from './score-import';
 
@@ -53,17 +54,7 @@ function staffNotation(state: NotationState): StaffNotation {
   return { bottomStep: reference === null ? null : reference - 2 * (state.line - 1), keyFifths: Number.isFinite(state.fifths) ? state.fifths : 0, soundingOffset: state.instrument + state.octave };
 }
 
-export const examples = [
-  ...publicCatalog,
-  ...(import.meta.env.DEV && import.meta.env.VITE_LOCAL_SCORES === 'true' ? [
-  { file: 'vecchia-zimarra-senti.mxl', title: 'Vecchia zimarra', subtitle: 'La Bohème · Colline', composer: 'Giacomo Puccini', period: '1896' },
-  { file: 'ideale-francesco-paolo-tosti.mxl', title: 'Ideale', subtitle: 'Mélodie pour voix et piano', composer: 'Francesco Paolo Tosti', period: '1882' },
-  { file: 'se-vuol-ballare-le-nozze-di-figaro-wa-mozart-piano.mxl', title: 'Se vuol ballare', subtitle: 'Les Noces de Figaro · Figaro', composer: 'Wolfgang Amadeus Mozart', period: '1786' },
-  { file: 'non-piu-andrai-de-mozart-version-pour-baryton-et-piano-avec-les-paroles.mxl', title: 'Non più andrai', subtitle: 'Les Noces de Figaro · Figaro', composer: 'Wolfgang Amadeus Mozart', period: '1786' },
-  { file: 'n1-notte-e-giorno-faticar-don-giovanni-wa-mozart-piano.mxl', title: 'Notte e giorno faticar', subtitle: 'Don Giovanni · Leporello', composer: 'Wolfgang Amadeus Mozart', period: '1787' },
-  { file: 'la-sonnambula-vi-ravviso-o-luoghi-ameni-bellini.mxl', title: 'Vi ravviso, o luoghi ameni', subtitle: 'La Sonnambula · Rodolfo', composer: 'Vincenzo Bellini', period: '1831' },
-  ] : []),
-];
+export const examples = [...publicCatalog, ...localScores];
 
 export function metadata(xml: string, filename: string) {
   checkScoreXML(xml);
