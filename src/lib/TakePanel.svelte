@@ -2,9 +2,10 @@
   import { t, translate, locale, formatDate } from './i18n';
   import { onMount } from 'svelte';
   import { X, Play, Download, Trash2, Cloud, HardDrive, LoaderCircle, AudioLines } from '@lucide/svelte';
-  import { listTakes, getTake, deleteTake, storageScope, subscribeStorage, type RecordedTake, type TakeSummary } from './storage';
+  import { listTakes, getTake, trashItem, storageScope, subscribeStorage, type RecordedTake, type TakeSummary } from './storage';
   import { syncState } from './sync';
-  import { readOrganization, folderFor, type OrganizationSnapshot } from './storage';
+  import { readOrganization } from './storage';
+  import { projectOrganization, type Organization } from './organization';
   import FolderControls from './FolderControls.svelte';
   import ItemFolder from './ItemFolder.svelte';
   import { matchesSearch } from './catalog';
@@ -14,11 +15,11 @@
   let failure = $state('');
   let revision = 0;
   let armedDelete = $state('');
-  let organization = $state<OrganizationSnapshot>({folders:[],placements:{}});
+  let organization = $state<Organization>(projectOrganization());
   let selectedFolder = $state('all');
   let search = $state('');
   const visibleTakes = $derived([...memoryTakes.filter(take => !takes.some(stored => stored.id === take.id)).map(take => ({ id: take.id, createdAt: take.createdAt, title: take.title, duration: take.duration, scoreId: take.scoreId, synced: false, pending: false })), ...takes].sort((a,b) => b.createdAt - a.createdAt));
-  const filteredTakes = $derived(visibleTakes.filter(take => matchesSearch(search,take.title) && (selectedFolder === 'all' || (folderFor(organization,'take',take.id) || 'unfiled') === selectedFolder)));
+  const filteredTakes = $derived(visibleTakes.filter(take => matchesSearch(search,take.title) && organization.matches('take',take.id,selectedFolder)));
   const duration = (value: number) => `${Math.floor(value / 60)}:${String(Math.floor(value % 60)).padStart(2, '0')}`;
   async function refresh() {
     const request = ++revision, scope = storageScope();
@@ -31,7 +32,7 @@
     busy = id; failure = '';
     const scope = storageScope();
     try {
-      if (kind === 'delete') { await deleteTake(id, scope); ondiscard(id); armedDelete = ''; }
+      if (kind === 'delete') { if (!memoryTakes.some(take => take.id === id)) await trashItem('take', id, scope); if (scope === storageScope()) ondiscard(id); armedDelete = ''; }
       else {
         const take = memoryTakes.find(take => take.id === id) || await getTake(id, scope);
         if (scope !== storageScope()) return;
@@ -41,7 +42,7 @@
     } catch (cause) { failure = cause instanceof Error ? cause.message : 'Impossible d’ouvrir cet essai.'; onerror(translate(failure)); }
     finally { busy = ''; }
   }
-  onMount(() => { void refresh(); const stop = subscribeStorage(event => { if (event.reason === 'scope') { takes = []; organization = {folders:[],placements:{}}; selectedFolder = 'all'; search = ''; armedDelete = ''; failure = ''; } void refresh(); }); return () => { revision++; stop(); }; });
+  onMount(() => { void refresh(); const stop = subscribeStorage(event => { if (event.reason === 'scope') { takes = []; organization = projectOrganization(); selectedFolder = 'all'; search = ''; armedDelete = ''; failure = ''; } void refresh(); }); return () => { revision++; stop(); }; });
 </script>
 
 <button class="drawer-backdrop" aria-label={$t("Fermer les enregistrements")} onclick={onclose}></button>

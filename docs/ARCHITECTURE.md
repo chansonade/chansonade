@@ -20,7 +20,8 @@ micro. Le serveur de comptes et de synchronisation est facultatif et indépendan
 | `lib/storage.ts`, `lib/sync.ts`, `lib/take-sync.ts` | Persistance locale, file de mutations et synchronisation automatique par compte. `AccountPanel.svelte` présente la connexion et son état. |
 | `lib/theme.ts`, `lib/ThemeToggle.svelte` | Préférence système/clair/sombre et application de `data-theme` au document. |
 | `lib/catalog.ts`, `public/scores/catalog.json` | Catalogue public éditorialisé, identités de contenu, dossiers par répertoire/langue et provenance par édition. |
-| `lib/FolderControls.svelte`, `lib/ItemFolder.svelte` | Dossiers personnels à un niveau, classement commun aux partitions et essais, sans modifier les fichiers. |
+| `lib/organization.ts` | Projection pure des dossiers imbriqués, chemins, destinations et classement actif/corbeille des partitions et essais. |
+| `lib/FolderControls.svelte`, `lib/ItemFolder.svelte` | Commandes et sélecteurs de dossiers personnels, communs aux partitions et essais. |
 
 Les styles communs sont dans `style.css`, les styles propres aux composants dans
 leurs fichiers Svelte. Les ressources servies telles quelles sont dans `public/`.
@@ -101,12 +102,57 @@ public client ni de l'archive source.
 
 ## Build, hors ligne et licences
 
-Les dossiers sont des ressources `organization` : une entrée par dossier et par
-placement (`score:<id>` / `take:<id>` côté interface). Ils utilisent la même file
-transactionnelle et la même synchronisation que les réglages. Les WAV restent
-immuables ; déplacer un essai ne les retransfère pas. Les dossiers publics sont
-un catalogue en lecture seule, distinct des données privées. Les ajouts publics
-emploient le SHA-256 du XML, identique aux imports privés, sans relancer le lecteur.
+Les dossiers et placements sont des ressources `organization` par compte :
+`folder.<uuid>` porte `{type:'folder',name,added,parentId?,trashedAt?}` et les
+placements `score.<id>` / `take.<uuid>` portent
+`{type:'placement',itemKind,itemId,folderId,trashedAt?}`. Les champs absents des
+anciennes données correspondent à la racine et à l'absence de corbeille explicite.
+Le serveur remplace les ressources sans fusion : les opérations clientes
+préservent les champs existants lorsqu'elles changent un nom ou un emplacement.
+
+`organization.ts` est la seule projection de ces ressources : parent absent ou
+supprimé → racine ; dans chaque cycle, lien parental coupé pour le plus petit
+identifiant lexicographique. Aucun correctif n'est écrit dans les ressources.
+L'appartenance à la corbeille est explicite (`trashedAt`) ou héritée du dossier.
+Sans dossier valide, un fichier actif est non classé. Chemins, destinations,
+filtres de sous-arbres et reprise automatique utilisent cette même projection.
+La lecture et les opérations de classement ne lisent que les ressources
+`organization`, jamais les valeurs des partitions, réglages ou mutations XML.
+La projection calcule la corbeille avec `trash(items)` : l'appelant fournit les
+identifiants des fichiers qu'il connaît déjà, sans inventaire persisté supplémentaire.
+Le vidage énumère les partitions par leurs clés `scopeKind`, y compris les clés
+de tombstones ; seules les valeurs sélectionnées sont lues par les primitives
+de suppression, qui laissent inchangés les tombstones existants. Les résumés
+locaux et la plage des seuls transferts de prises complètent les candidats au
+vidage, y compris les téléchargements sans copie locale.
+Les noms identiques sont autorisés. Les parcours sont itératifs, sans limite de
+profondeur supplémentaire. Les sélecteurs actuels présentent des chemins ;
+l'arbre visuel et la vue corbeille sont une étape d'interface ultérieure.
+
+Supprimer met à la corbeille et conserve les fichiers ; seule une suppression
+définitive confirmée les détruit. Mettre un dossier à la corbeille ne modifie
+aucun descendant ni placement. Restaurer un enfant dont le parent reste à la
+corbeille le détache à la racine, ou dans « Non classés » pour un fichier.
+Les descendants supprimés individuellement restent à la corbeille. Partitions
+et essais sont classés indépendamment ; supprimer une partition seule ne
+supprime pas les essais conservés ailleurs. La corbeille compte dans les quotas
+et ne se vide jamais automatiquement.
+
+Le vidage écrit, dans une seule transaction IndexedDB, les tombstones des dossiers,
+partitions, réglages et placements concernés et les suppressions de prises, avec
+leurs opérations dans l'outbox existante. Il ne crée aucun protocole de purge.
+Une restauration ou modification concurrente peut faire réapparaître une ressource
+selon la résolution habituelle des conflits ; l'anti-résurrection des prises reste
+inchangée. Les éléments arrivés après cette transaction ne sont pas supprimés.
+
+La recherche, les sélections ordinaires et la reprise du dernier morceau/essai
+excluent la corbeille, y compris le repli sur une édition publique de même identité.
+Une partition déjà ouverte et une capture continuent ; le dossier d'un nouvel essai
+est résolu dans la transaction de sauvegarde, dans son compte d'origine, seulement
+si la partition et le dossier sont encore actifs. Sinon l'essai est non classé.
+Les WAV restent immuables et les déplacements ne les retransfèrent pas. Les dossiers
+publics restent un catalogue distinct en lecture seule. Les ajouts publics utilisent
+le SHA-256 du XML, identique aux imports privés, sans relancer le lecteur.
 
 Le projet indépendant `chansonade-site` génère les pages publiques sans JavaScript.
 Il ne lit que le manifeste et les assets publics comme entrées de build ; aucun

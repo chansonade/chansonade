@@ -1438,6 +1438,229 @@ try {
   assert.deepEqual(capturedScopes, [1, 0]);
   console.log('PASS browser: latest opening wins across startup, catalogue success/errors, import reads/hash, saved library, engraving/audio and A-B-A account changes; account opening waits for capture saved in its original scope');
 
+  const organizationContext = await isolatedContext();
+  await organizationContext.route('**/api/v1/**', route => route.fulfill({ json: { user: null, registration: 'open' } }));
+  const organizationPage = await organizationContext.newPage();
+  await organizationPage.goto(url); await ready(organizationPage);
+  const organizationResult = await organizationPage.evaluate(async xml => {
+    const s = await import('/src/lib/storage.ts');
+    const { folderFor } = await import('/src/lib/organization.ts');
+    const { microphoneWav } = await import('/src/lib/wav.ts');
+    const check = (value, message) => { if (!value) throw Error(message); };
+    const scope = 'user:organization-a', other = 'user:organization-b';
+    const settings = { rate: 1, loopA: null, loopB: null, loopEnabled: false, target: 0, parts: [] };
+    const score = { id: 'organization-score', title: 'Synthetic organization', composer: '', xml, added: 1 };
+    const raw = async target => {
+      const connection = await new Promise((resolve, reject) => { const request = indexedDB.open('chansonade', 5); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
+      try {
+        return await new Promise((resolve, reject) => {
+          const tx = connection.transaction(['resources', 'takeData', 'takeIndex', 'outbox']);
+          const requests = ['resources', 'takeData', 'takeIndex', 'outbox'].map(name => [name, tx.objectStore(name).getAll()]);
+          tx.oncomplete = () => resolve(Object.fromEntries(requests.map(([name, request]) => [name, request.result.filter(row => row.scope === target)])));
+          tx.onabort = () => reject(tx.error);
+        });
+      } finally { connection.close(); }
+    };
+    async function withoutScoreValues(operation, allowed = new Set()) {
+      const restorations = [], forbidden = [];
+      function includes(query, key) { return query === undefined || (query instanceof IDBKeyRange ? query.includes(key) : indexedDB.cmp(query, key) === 0); }
+      for (const prototype of [IDBObjectStore.prototype, IDBIndex.prototype]) {
+        for (const name of ['get', 'getAll', 'getAllRecords', 'openCursor']) {
+          const original = prototype[name];
+          if (!original) continue;
+          prototype[name] = function(query, ...args) {
+            const store = this instanceof IDBIndex ? this.objectStore : this;
+            if (store.name === 'resources' || store.name === 'outbox') {
+              let readsScore = false;
+              if (this instanceof IDBIndex) {
+                readsScore = this.name === 'scope' ? includes(query, scope)
+                  : this.name === 'scopeKind' ? ['score', 'settings'].some(kind => includes(query, [scope, kind])) : true;
+              } else if (query instanceof IDBKeyRange) {
+                readsScore = ['score', 'settings'].some(kind =>
+                  (query.lower === undefined || indexedDB.cmp(query.lower, [scope, kind, '\uffff']) <= 0)
+                  && (query.upper === undefined || indexedDB.cmp(query.upper, [scope, kind, '']) >= 0));
+              } else readsScore = query === undefined || (Array.isArray(query) && query[0] === scope && ['score', 'settings'].includes(query[1]) && !allowed.has(query[2]));
+              if (readsScore) { forbidden.push(`${store.name}.${name}`); throw Error(`Unexpected score value read: ${store.name}.${name}`); }
+            }
+            return original.call(this, query, ...args);
+          };
+          restorations.push(() => { prototype[name] = original; });
+        }
+      }
+      try { const value = await operation(); check(forbidden.length === 0, 'Score value reads must not be swallowed'); return value; }
+      finally { for (const restore of restorations.reverse()) restore(); }
+    }
+    const root = await s.createFolder('Root', null, scope), child = crypto.randomUUID();
+    await s.applyRemoteChanges(scope, [{ kind: 'organization', id: `folder.${child}`, revision: 10, deleted: false,
+      data: { type: 'folder', name: 'Child', added: 2, parentId: root, trashedAt: null, futureField: 'folder preserved' } }], 10);
+    await s.renameFolder(child, 'Renamed', scope);
+    await s.moveFolder(child, null, scope); await s.moveFolder(child, root, scope);
+    let refused = false;
+    try { await s.moveFolder(root, child, scope); } catch { refused = true; }
+    check(refused, 'A folder cannot be moved into its projected descendants');
+    const sameName = await s.createFolder('Renamed', root, scope);
+    check(sameName !== child, 'Duplicate sibling names are allowed');
+    await s.saveScore(score, scope); await s.writeSettings(score.id, settings, scope);
+    await s.saveScore({ ...score, title: 'Other account' }, other);
+    await s.applyRemoteChanges(scope, [{ kind: 'organization', id: `score.${score.id}`, revision: 11, deleted: false,
+      data: { type: 'placement', itemKind: 'score', itemId: score.id, folderId: root, trashedAt: null, futureField: 'placement preserved' } }], 11);
+    await s.moveItem('score', score.id, child, scope);
+    const direct = { ...score, id: 'organization-direct', title: 'Restored separately' };
+    await s.saveScore(direct, scope); await s.moveItem('score', direct.id, root, scope);
+    const take = { id: crypto.randomUUID(), createdAt: 2, title: 'Synthetic organization take', scoreId: score.id, scoreXML: xml,
+      duration: 64 / 48000, sampleRate: 48000, samples: 64, captureStartedAt: 0, settings, latencyMs: 0,
+      detector: { name: 'Synthetic' }, pitches: [], transport: [], audio: microphoneWav([new Float32Array(64)], 48000) };
+    await s.saveTake({ ...take, id: 'outside-take', scoreId: 'unfiled-score', createdAt: 1 }, scope);
+    await s.saveTake(take, scope);
+    check(folderFor(await s.readOrganization(scope), 'take', take.id) === child, 'New take inherits the score folder');
+    const remoteTake = crypto.randomUUID(), deletedScore = 'organization-deleted';
+    await s.queueRemoteTakes(scope, [{ id: remoteTake, title: 'Remote download', ready: true, deleted: false }]);
+    await s.moveItem('take', remoteTake, child, scope);
+    await s.applyRemoteChanges(scope, [
+      { kind: 'score', id: deletedScore, revision: 12, deleted: true, data: null },
+      { kind: 'organization', id: `score.${deletedScore}`, revision: 13, deleted: false,
+        data: { type: 'placement', itemKind: 'score', itemId: deletedScore, folderId: root, trashedAt: 0 } },
+    ], 13);
+    await withoutScoreValues(async () => {
+      await s.readOrganization(scope);
+      const folder = await s.createFolder('No XML reads', root, scope);
+      await s.renameFolder(folder, 'Still no XML reads', scope);
+      await s.moveFolder(folder, child, scope);
+      await s.trashFolder(folder, scope); await s.restoreFolder(folder, scope);
+      await s.moveItem('score', score.id, root, scope); await s.moveItem('score', score.id, child, scope);
+      await s.trashItem('score', score.id, scope); await s.restoreItem('score', score.id, scope);
+      await s.trashItem('take', take.id, scope); await s.restoreItem('take', take.id, scope);
+    });
+    const prior = await raw(scope);
+    check(prior.resources.find(row => row.id === `folder.${child}`).data.futureField === 'folder preserved', 'Rename and folder moves preserve other fields');
+    check(prior.resources.find(row => row.id === `score.${score.id}` && row.kind === 'organization').data.futureField === 'placement preserved', 'Item moves preserve other fields');
+    await s.trashFolder(root, scope);
+    let organization = await s.readOrganization(scope);
+    check(organization.classify('score', score.id).state === 'trash' && organization.classify('take', take.id).state === 'trash', 'Folder trash is inherited');
+    check((await s.latestTake(scope)).id === 'outside-take', 'Latest take skips a newer trashed take');
+    const afterTrash = await raw(scope);
+    check(JSON.stringify(afterTrash.resources.find(row => row.id === `folder.${child}`)) === JSON.stringify(prior.resources.find(row => row.id === `folder.${child}`)), 'Trashing a parent does not rewrite descendants');
+    check(JSON.stringify(afterTrash.resources.find(row => row.id === `score.${score.id}` && row.kind === 'organization')) === JSON.stringify(prior.resources.find(row => row.id === `score.${score.id}` && row.kind === 'organization')), 'Trashing a parent leaves placements intact');
+    const late = { ...take, id: crypto.randomUUID(), createdAt: 3 };
+    await withoutScoreValues(() => s.saveTake(late, scope));
+    check(folderFor(await s.readOrganization(scope), 'take', late.id) === null, 'A take saved after its folder was trashed is unfiled');
+    check(!!await s.getTake(late.id, scope), 'Capture data is preserved');
+    await s.restoreItem('score', direct.id, scope);
+    check((await s.readOrganization(scope)).classify('score', direct.id).state === 'unfiled', 'Restoring a file under a trashed ancestor detaches it');
+    await s.restoreFolder(child, scope);
+    check((await s.readOrganization(scope)).folder(child).parentId === null, 'Restoring a folder under a trashed ancestor detaches it');
+    await s.trashItem('score', score.id, scope);
+    await s.restoreFolder(root, scope);
+    check((await s.readOrganization(scope)).classify('score', score.id).state === 'trash', 'Explicit file trash survives ancestor restoration');
+    await s.restoreItem('score', score.id, scope); await s.moveFolder(child, root, scope);
+    await s.trashFolder(root, scope);
+    const beforePurge = await raw(scope), untouched = await raw(other);
+    const put = IDBObjectStore.prototype.put;
+    const transactions = new Set(); let tombstones = 0, failed = false;
+    IDBObjectStore.prototype.put = function(value, ...args) {
+      if (value.scope === scope) {
+        transactions.add(this.transaction);
+        if (this.name === 'resources' && value.deleted && ++tombstones === 2) throw Error('Synthetic purge failure');
+      }
+      return put.call(this, value, ...args);
+    };
+    try { await withoutScoreValues(() => s.purgeTrash({ kind: 'folder', id: root }, scope), new Set([score.id, deletedScore])); } catch (cause) { check(cause.message === 'Synthetic purge failure', cause.message); failed = true; }
+    finally { IDBObjectStore.prototype.put = put; }
+    check(failed && transactions.size === 1 && JSON.stringify(await raw(scope)) === JSON.stringify(beforePurge), 'A partial purge failure rolls back resources, WAVs, indexes and the entire queue');
+    transactions.clear();
+    IDBObjectStore.prototype.put = function(value, ...args) { if (value.scope === scope) transactions.add(this.transaction); return put.call(this, value, ...args); };
+    try { await withoutScoreValues(() => s.purgeTrash({ kind: 'folder', id: root }, scope), new Set([score.id, deletedScore])); }
+    finally { IDBObjectStore.prototype.put = put; }
+    check(transactions.size === 1, 'All purge writes share one IndexedDB transaction');
+    const purged = await raw(scope), queue = await s.syncQueue(scope);
+    for (const [kind, id] of [['score', score.id], ['settings', score.id], ['organization', `score.${score.id}`], ['organization', `folder.${root}`], ['organization', `folder.${child}`], ['organization', `folder.${sameName}`], ['organization', `take.${take.id}`]]) {
+      check(purged.resources.some(row => row.kind === kind && row.id === id && row.deleted), `Missing tombstone ${kind}:${id}`);
+      check(queue.some(job => job.kind === kind && job.id === id && job.deleted), `Missing delete mutation ${kind}:${id}`);
+    }
+    check(!queue.some(job => job.kind === 'score' && job.id === deletedScore), 'Existing score tombstones do not create new score mutations');
+    check(queue.some(job => job.kind === 'take' && job.id === remoteTake && job.operation === 'delete') && (await s.takeSyncEntries(scope)).some(item => item.id === remoteTake && item.deleted), 'Remote-only downloads are purged through the existing take queue');
+    check(queue.find(job => job.kind === 'organization' && job.id === `score.${score.id}`).baseRevision === 11, 'Resource deletions preserve their base revision');
+    check(queue.some(job => job.kind === 'take' && job.id === take.id && job.operation === 'delete'), 'Take deletion uses its existing queue');
+    check(!await s.getTake(take.id, scope) && !!await s.getTake(late.id, scope), 'Purge deletes the contained WAV and preserves an unfiled take');
+    await s.applyRemoteTake(scope, take.id, take);
+    check(!await s.getTake(take.id, scope), 'Existing take anti-resurrection is unchanged');
+    check(JSON.stringify(await raw(other)) === JSON.stringify(untouched), 'Purge leaves another account intact');
+    await s.trashItem('score', direct.id, scope); await s.trashItem('take', late.id, scope);
+    await s.purgeTrash('all', scope);
+    const inventory = [...(await s.savedScores(scope)).map(item => ({ kind: 'score', id: item.id })), ...(await s.listTakes(scope)).map(item => ({ kind: 'take', id: item.id }))];
+    check((await s.readOrganization(scope)).trash(inventory).length === 0 && !await s.getTake(late.id, scope), 'Empty trash handles separately trashed files and takes');
+    let blocked = false;
+    try { await s.purgeTrash({ kind: 'take', id: 'outside-take' }, scope); } catch { blocked = true; }
+    check(blocked && !!await s.getTake('outside-take', scope), 'An active item cannot be purged');
+
+    const anonymous = s.ANONYMOUS_SCOPE, adopted = 'user:organization-adopted';
+    const anonRoot = await s.createFolder('Anonymous root', null, anonymous), anonChild = await s.createFolder('Anonymous child', anonRoot, anonymous);
+    await s.saveScore({ ...score, id: 'anonymous-score' }, anonymous);
+    await s.moveItem('score', 'anonymous-score', anonChild, anonymous);
+    const anonTake = { ...take, id: crypto.randomUUID(), scoreId: 'anonymous-score' };
+    await s.saveTake(anonTake, anonymous); await s.trashItem('take', anonTake.id, anonymous); await s.trashFolder(anonRoot, anonymous);
+    await s.saveTake({ ...anonTake, title: 'Existing target take' }, adopted);
+    await s.claimAnonymousLibrary(adopted); await s.claimAnonymousTakes(adopted);
+    const adoptedOrganization = await s.readOrganization(adopted);
+    check(adoptedOrganization.folder(anonChild).parentId === anonRoot && adoptedOrganization.folder(anonChild).trashed, 'Adoption preserves hierarchy and inherited trash');
+    check(adoptedOrganization.classify('score', 'anonymous-score').state === 'trash', 'Adoption preserves score placement');
+    const movedTake = (await s.listTakes(adopted)).find(item => item.title === anonTake.title);
+    check(movedTake && movedTake.id !== anonTake.id && adoptedOrganization.classify('take', movedTake.id).explicitlyTrashed, 'Take ID collision remapping preserves its trash placement');
+    check((await s.readOrganization(anonymous)).folders.length === 0 && (await s.listTakes(anonymous)).length === 0, 'Anonymous adoption moves instead of copying');
+    check(JSON.stringify(await raw(other)) === JSON.stringify(untouched), 'Adoption cannot claim another account');
+    return { scope, other, adopted, root, child, purgedTake: take.id };
+  }, syntheticXML('Synthetic organization'));
+  assert.equal(organizationResult.scope, 'user:organization-a');
+  console.log('PASS organization storage: no score/settings/XML-outbox value reads for classification, only targeted purge reads, remote downloads and existing tombstones; hierarchy, preserved fields, trash/restore, capture inheritance, latest take, atomic purge/rollback, ordinary outbox/take tombstones and scoped anonymous adoption');
+
+  await organizationPage.getByRole('button', { name: 'Bibliothèque', exact: true }).click();
+  await organizationPage.getByRole('button', { name: 'Mes partitions', exact: true }).click();
+  const folders = organizationPage.getByRole('combobox', { name: 'Filtrer par dossier', exact: true });
+  async function createOrganizationFolder(name) {
+    await organizationPage.getByRole('button', { name: 'Créer un dossier', exact: true }).click();
+    await organizationPage.getByRole('textbox', { name: 'Nom du dossier', exact: true }).fill(name);
+    await organizationPage.getByRole('button', { name: 'Enregistrer le dossier', exact: true }).click();
+    await organizationPage.getByRole('textbox', { name: 'Nom du dossier', exact: true }).waitFor({ state: 'detached' });
+  }
+  await createOrganizationFolder('UI parent');
+  assert.equal(await folders.inputValue(), 'all', 'Creating a folder does not enter it');
+  await folders.selectOption({ label: 'UI parent' });
+  const parent = await folders.inputValue();
+  await createOrganizationFolder('UI child');
+  assert.equal(await folders.inputValue(), parent);
+  assert.equal(await folders.locator('option').filter({ hasText: 'UI parent / UI child' }).count(), 1);
+  await organizationPage.locator('input[type=file]').setInputFiles({ name: 'organization.musicxml', mimeType: 'application/xml', buffer: Buffer.from(syntheticXML('UI organization')) });
+  await ready(organizationPage);
+  await organizationPage.waitForFunction(() => document.querySelector('h1')?.textContent === 'UI organization');
+  if (!await organizationPage.locator('.library-panel').count()) await organizationPage.getByRole('button', { name: 'Bibliothèque', exact: true }).click();
+  await organizationPage.getByRole('button', { name: 'Supprimer le dossier', exact: true }).click();
+  await organizationPage.getByText('Le dossier et son contenu seront conservés dans la corbeille.', { exact: true }).waitFor();
+  await organizationPage.getByRole('button', { name: 'Supprimer ce dossier', exact: true }).click();
+  await organizationPage.waitForFunction(() => ![...document.querySelectorAll('.saved-piece strong')].some(node => node.textContent === 'UI organization'));
+  assert.equal(await folders.locator('option').filter({ hasText: 'UI parent' }).count(), 0);
+  await organizationPage.reload(); await ready(organizationPage);
+  assert.notEqual(await organizationPage.locator('h1').innerText(), 'UI organization', 'Startup cannot reopen a trashed personal score');
+  await organizationPage.evaluate(async () => {
+    const s = await import('/src/lib/storage.ts'), { publicCatalog } = await import('/src/lib/catalog.ts');
+    await s.trashItem('score', publicCatalog[0].id);
+    localStorage.setItem('chansonade.last', publicCatalog[0].id);
+    window.__hiddenPublicScore = publicCatalog[0].id;
+  });
+  const hiddenPublic = await organizationPage.evaluate(() => window.__hiddenPublicScore);
+  await organizationPage.reload(); await ready(organizationPage);
+  assert.notEqual(await organizationPage.evaluate(() => localStorage.getItem('chansonade.last')), hiddenPublic, 'Startup fallback must not reopen the same public identity through the catalogue');
+  await organizationPage.evaluate(async ({ adopted }) => {
+    const s = await import('/src/lib/storage.ts'); s.setStorageScope(adopted);
+    window.__organizationExpectedScope = adopted;
+  }, organizationResult);
+  await ready(organizationPage);
+  await organizationPage.getByRole('button', { name: 'Bibliothèque', exact: true }).click();
+  await organizationPage.getByRole('button', { name: 'Mes partitions', exact: true }).click();
+  assert.equal(await organizationPage.evaluate(async () => (await import('/src/lib/storage.ts')).storageScope()), organizationResult.adopted);
+  assert.equal(await organizationPage.locator('.saved-piece').count(), 0, 'Account switch must not reveal its trashed adopted library');
+  assert.equal(await organizationPage.getByRole('combobox', { name: 'Filtrer par dossier', exact: true }).locator('option').count(), 2, 'The old account folders and adopted trash are excluded');
+  console.log('PASS organization UI: create in place, path selectors, soft folder deletion, persistent startup exclusions (personal/public identity) and account change');
+
   assert.deepEqual(errors, [], 'No unhandled browser errors');
 } finally {
   for (const context of contexts.reverse()) await context.close();

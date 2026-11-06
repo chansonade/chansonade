@@ -3,9 +3,9 @@ import { PITCH_CONFIG } from './pitch-config';
 import type { PitchInput } from './pitch';
 import { saveTake, type PracticeSettings, type RecordedTake, type TakePitch, type TakeTransport } from './storage';
 
-/** Data captured at the start of a take, including its account and folder. */
+/** Data captured at the start of a take, including its account. Folder inheritance is resolved atomically when saving. */
 export type TakeCapture = {
-  scope: string; folderId: string | null; startedAt: number; createdAt: number;
+  scope: string; startedAt: number; createdAt: number;
   scoreId: string; title: string; scoreXML: string; settings: PracticeSettings;
   latencyMs: number; pitches: TakePitch[]; transport: TakeTransport[]; metadataLimitReached?: boolean;
 };
@@ -50,7 +50,7 @@ export async function finishCapturedTake(pitch: PitchInput, captured: TakeCaptur
     pitches: captured.pitches.filter(point => point.time <= recording.duration),
     transport: captured.transport.filter(point => point.time <= recording.duration),
   };
-  try { await saveTake(take, captured.scope, captured.folderId); return { take, persisted: true }; }
+  try { await saveTake(take, captured.scope); return { take, persisted: true }; }
   catch { return { take, persisted: false }; }
 }
 

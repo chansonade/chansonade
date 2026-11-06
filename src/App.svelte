@@ -16,7 +16,8 @@
   import FolderControls from './lib/FolderControls.svelte';
   import ItemFolder from './lib/ItemFolder.svelte';
   import { publicCatalog, catalogGroups, matchesSearch, type CatalogPiece, type CatalogGroup } from './lib/catalog';
-  import { readOrganization, folderFor, moveItem, type OrganizationSnapshot } from './lib/storage';
+  import { readOrganization, moveItem, restoreItem } from './lib/storage';
+  import { projectOrganization, type Organization } from './lib/organization';
   import { measuresInLoop, canonicalLoopBounds } from './lib/loop';
   import { syncState, startSync, setTakeSyncPaused } from './lib/sync';
   import { PitchInput, type PitchResult, type RecordingEndReason } from './lib/pitch';
@@ -25,7 +26,7 @@
   import { finishCapturedTake, takeArchive, TakeMetadataBudget, type TakeCapture } from './lib/take-session';
   import { requestPersistentStorage } from './lib/storage-health';
   import { readPreference, writePreference } from './lib/preferences';
-  import { savedScores, saveScore, scoreId, readSettings, writeSettings, storageScope, subscribeStorage, listTakes, latestTake as loadLatestTake, type SavedScore, type PracticeSettings, type RecordedTake, type TakePitch, type TakeTransport } from './lib/storage';
+  import { savedScores, saveScore, scoreId, readSettings, writeSettings, storageScope, subscribeStorage, latestTake as loadLatestTake, type SavedScore, type PracticeSettings, type RecordedTake, type TakePitch, type TakeTransport } from './lib/storage';
 
   let engine: Score;
   const audio = new AudioPlayer();
@@ -45,7 +46,7 @@
   let currentXML = '';
   let documentScope = storageScope();
   let libraryScope = storageScope();
-  let libraryRequest: Promise<[SavedScore[], OrganizationSnapshot]> | null = null;
+  let libraryRequest: Promise<[SavedScore[], Organization]> | null = null;
   let practiceDirty = false;
   let practiceTouched = false;
   let documentStarted = false;
@@ -61,14 +62,14 @@
   let accountOpen = $state(!!initialInvitation || !!initialReset);
   if (initialInvitation || initialReset) history.replaceState(null, '', `${location.pathname}${location.search}`);
   let customScores = $state<SavedScore[]>([]);
-  let organization = $state<OrganizationSnapshot>({folders:[],placements:{}});
+  let organization = $state<Organization>(projectOrganization());
   let libraryTab = $state<'personal'|'public'>('public');
   let libraryTabChosen = false;
   let libraryFolder = $state('all');
   let librarySearch = $state('');
   let catalogGroup = $state<CatalogGroup>('children-fr');
   let addingPublic = $state(false);
-  const filteredScores = $derived(customScores.filter(score => matchesSearch(librarySearch,score.title,score.composer) && (libraryFolder === 'all' || (folderFor(organization,'score',score.id) || 'unfiled') === libraryFolder)));
+  const filteredScores = $derived(customScores.filter(score => matchesSearch(librarySearch,score.title,score.composer) && organization.matches('score',score.id,libraryFolder)));
   const filteredPublic = $derived(publicCatalog.filter(piece => piece.group === catalogGroup && matchesSearch(librarySearch,piece.title,piece.composer)));
   const currentPublicPiece = $derived(publicCatalog.find(piece => piece.id === currentId));
   let libraryOpen = $state(false);
@@ -310,6 +311,7 @@
     status = 'Préparation de la partition…';
     try {
       const source = yield* resolveScoreSource(request);
+      if (!source) { clearAccountDocument(request.scope); return; }
       const document = yield* readScoreDocument(source, request.scope);
       yield* installScoreDocument(source, document, request.scope);
       if (source.kind === 'file') yield* saveImportedScore(source, document, request.scope);
@@ -321,7 +323,7 @@
     }
   }
 
-  function* resolveScoreSource(request: Opening): OpeningSteps<DirectScoreSource> {
+  function* resolveScoreSource(request: Opening): OpeningSteps<DirectScoreSource | null> {
     const { source, scope } = request;
     if (source.kind !== 'library') return source;
     if (documentScope !== scope) {
@@ -332,9 +334,11 @@
     const scores = yield* openingWait(reloadLibrary(scope));
     const requested = publicCatalog.find(piece => piece.id === source.requestedId);
     const saved = scores.find(score => score.id === source.lastId);
+    const available = examples.filter(example => organization.matches('score', 'id' in example && typeof example.id === 'string' ? example.id : example.file));
+    const example = available.find(example => ('id' in example && example.id === source.lastId) || example.file === source.lastId) || available[0];
     return requested ? { kind: 'catalog', example: requested }
       : saved ? { kind: 'saved', score: saved }
-      : { kind: 'catalog', example: examples.find(example => ('id' in example && example.id === source.lastId) || example.file === source.lastId) || examples[0] };
+      : example ? { kind: 'catalog', example } : null;
   }
 
   function* readScoreDocument(source: DirectScoreSource, scope: string): OpeningSteps<ScoreDocument> {
@@ -406,6 +410,7 @@
     const { id, info, xml } = document;
     try {
       yield* openingWait(saveScore({ id, ...info, xml, added: Date.now() }, scope));
+      yield* openingWait(restoreItem('score', id, scope));
       if (source.folderId) yield* openingWait(moveItem('score', id, source.folderId, scope));
       yield* openingWait(reloadLibrary(scope));
     } catch { notify('Partition ouverte. Le navigateur n’a pas pu la conserver.'); }
@@ -433,7 +438,8 @@
       if (scope !== storageScope()) return;
       if (await scoreId(xml) !== piece.id) throw new Error('La partition ne correspond pas au catalogue.');
       if (!(await savedScores(scope)).some(score => score.id === piece.id)) await saveScore({id:piece.id,title:piece.title,composer:piece.composer,xml,added:Date.now()},scope);
-      if (libraryFolder !== 'all' && libraryFolder !== 'unfiled') await moveItem('score',piece.id,libraryFolder,scope);
+      await restoreItem('score',piece.id,scope);
+      if (organization.destinations().some(folder => folder.id === libraryFolder)) await moveItem('score',piece.id,libraryFolder,scope);
       await reloadLibrary(scope);
       notify('Partition ajoutée à votre bibliothèque.');
     } catch(cause) { notify(cause instanceof Error ? cause.message : 'Impossible d’ajouter cette partition.'); }
@@ -442,7 +448,7 @@
 
   function importFile(file?: File) {
     if (!file) return;
-    const folderId = organization.folders.find(folder => folder.id === libraryFolder)?.id || null;
+    const folderId = organization.destinations().find(folder => folder.id === libraryFolder)?.id || null;
     if (fileInput) fileInput.value = '';
     return chooseScore({ kind: 'file', file, folderId });
   }
@@ -791,10 +797,7 @@
     lastTake = take;
   }
   async function reloadLastTake(scope = storageScope()) {
-    const [summary] = await listTakes(scope);
-    if (scope !== storageScope() || disposed) return;
-    if (lastTake?.id === summary?.id) return;
-    const take = summary ? await loadLatestTake(scope) : null;
+    const take = await loadLatestTake(scope);
     if (scope === storageScope()) showTake(take);
   }
   function stopReplay() {
@@ -849,7 +852,7 @@
       if (request !== takeRequest) return;
       setFollow(true);
       clearPitchTrace();
-      const draft: TakeCapture = { scope, folderId:folderFor(organization,'score',currentId), startedAt: pitch.currentTime, createdAt: Date.now(), scoreId: currentId, title, scoreXML: currentXML, settings: JSON.parse(JSON.stringify({ rate, loopA, loopB, loopEnabled, target: targetChannel, parts })), latencyMs: latency, pitches: [], transport: [] };
+      const draft: TakeCapture = { scope, startedAt: pitch.currentTime, createdAt: Date.now(), scoreId: currentId, title, scoreXML: currentXML, settings: JSON.parse(JSON.stringify({ rate, loopA, loopB, loopEnabled, target: targetChannel, parts })), latencyMs: latency, pitches: [], transport: [] };
       const budget = new TakeMetadataBudget(draft);
       if (!budget.fits) throw new Error('La partition est trop volumineuse pour enregistrer un essai.');
       const start = await pitch.startRecording();
@@ -945,7 +948,8 @@
   async function reloadLibrary(scope = storageScope()) {
     const request = Promise.all([savedScores(scope), readOrganization(scope)]);
     libraryRequest = request;
-    const [scores,folders] = await request;
+    const [stored,folders] = await request;
+    const scores = stored.filter(score => folders.matches('score', score.id));
     if (!disposed && request === libraryRequest && scope === storageScope()) { customScores = scores; organization = folders; libraryScope = scope; if(!libraryTabChosen && scores.length) libraryTab = 'personal'; }
     return scores;
   }
@@ -961,7 +965,7 @@
     music = null; pages = []; geometry = null; currentXML = ''; currentId = '';
     title = 'Ouvrir une partition'; composer = ''; subtitle = '';
     documentScope = scope; defaultParts = []; parts = [];
-    organization = {folders:[],placements:{}}; libraryFolder = 'all'; librarySearch = ''; libraryTabChosen = false;
+    organization = projectOrganization(); libraryFolder = 'all'; librarySearch = ''; libraryTabChosen = false;
     practiceDirty = false; practiceTouched = false; documentStarted = false;
     clearPitchTrace(); captureTimeline.reset();
   }

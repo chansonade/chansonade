@@ -1,3 +1,5 @@
+import { projectOrganization, folderFor, type FolderData, type PlacementData, type ItemKind, type Organization, type OrganizationItem, type OrganizationTarget } from './organization';
+
 export type SavedScore = { id: string; title: string; composer: string; xml: string; added: number };
 export type PracticeSettings = { rate: number; loopA: number | null; loopB: number | null; loopEnabled: boolean; target: number; parts: { channel: number; volume: number; muted: boolean; solo: boolean; transpose: number; program: number }[] };
 export type TakePitch = {
@@ -162,19 +164,19 @@ async function migrateTakes(connection: IDBDatabase) {
   });
 }
 
-export async function saveTake(take: RecordedTake, scope = activeScope, folderId?: string | null) {
+export async function saveTake(take: RecordedTake, scope = activeScope) {
   const connection = await db();
   await transaction(connection, ['takeData', 'takeIndex', 'resources', 'outbox', 'meta'], 'readwrite', async tx => {
     await assertAccountPresent(tx, scope);
-    if (folderId != null) checkFolderId(folderId);
+    const organization = await organizationInTransaction(tx, scope);
+    const folderId = folderFor(organization, 'score', take.scoreId);
     const index = tx.objectStore('takeIndex');
     const old = await requestValue<TakeIndex | undefined>(index.get([scope, take.id]));
     if (old) throw new Error('Cet essai existe déjà.');
     tx.objectStore('takeData').put({ scope, id: take.id, take } satisfies TakeData);
     index.put(takeSummary(take, scope));
     if (scope !== ANONYMOUS_SCOPE) tx.objectStore('outbox').put(takeJob(scope, take.id, take.title, 1, 'upload'));
-    if (folderId !== undefined) {
-      checkedItem('take', take.id);
+    if (folderId !== null) {
       await writeResourceInTransaction(tx, 'organization', `take.${take.id}`, { type: 'placement', itemKind: 'take', itemId: take.id, folderId }, scope);
     }
   });
@@ -193,21 +195,27 @@ export async function getTake(id: string, scope = activeScope): Promise<Recorded
   });
 }
 export async function latestTake(scope = activeScope): Promise<RecordedTake | null> {
-  const [latest] = await listTakes(scope);
+  const [takes, organization] = await Promise.all([listTakes(scope), readOrganization(scope)]);
+  const latest = takes.find(take => organization.matches('take', take.id));
   return latest ? getTake(latest.id, scope) : null;
+}
+async function deleteTakeInTransaction(tx: IDBTransaction, id: string, scope: string) {
+  const index = tx.objectStore('takeIndex');
+  const record = await requestValue<TakeIndex | undefined>(index.get([scope, id]));
+  if (record?.deleted) return;
+  const job = await requestValue<PendingTake | undefined>(tx.objectStore('outbox').get(key(scope, 'take', id)));
+  const tombstone: TakeIndex = { scope, id, title: record?.title ?? job?.title ?? id, createdAt: record?.createdAt ?? 0,
+    scoreId: record?.scoreId ?? '', duration: record?.duration ?? 0, deleted: true, change: (record?.change ?? 0) + 1 };
+  index.put(tombstone); tx.objectStore('takeData').delete([scope, id]);
+  if (scope !== ANONYMOUS_SCOPE) tx.objectStore('outbox').put(takeJob(scope, id, tombstone.title, tombstone.change, 'delete'));
+  const placement = await requestValue<LocalResource | undefined>(tx.objectStore('resources').get(key(scope, 'organization', `take.${id}`)));
+  if (placement && !placement.deleted) await writeResourceInTransaction(tx, 'organization', `take.${id}`, null, scope);
 }
 export async function deleteTake(id: string, scope = activeScope) {
   const connection = await db();
   await transaction(connection, ['takeData', 'takeIndex', 'resources', 'outbox', 'meta'], 'readwrite', async tx => {
     await assertAccountPresent(tx, scope);
-    const index = tx.objectStore('takeIndex');
-    const record = await requestValue<TakeIndex | undefined>(index.get([scope, id]));
-    if (!record || record.deleted) return;
-    record.deleted = true; record.change++;
-    if (scope !== ANONYMOUS_SCOPE) tx.objectStore('outbox').put(takeJob(scope, id, record.title, record.change, 'delete'));
-    index.put(record); tx.objectStore('takeData').delete([scope, id]);
-    const placement = await requestValue<LocalResource | undefined>(tx.objectStore('resources').get(key(scope, 'organization', `take.${id}`)));
-    if (placement && !placement.deleted) await writeResourceInTransaction(tx, 'organization', `take.${id}`, null, scope);
+    await deleteTakeInTransaction(tx, id, scope);
   });
   changed(scope, 'write');
 }
@@ -331,10 +339,6 @@ export async function applyRemoteTake(scope: string, id: string, take: RecordedT
   if (didChange) changed(scope, 'remote');
 }
 
-export type LibraryFolder = { id: string; name: string; added: number };
-export type OrganizationSnapshot = { folders: LibraryFolder[]; placements: Record<string, string | null> };
-export type FolderData = { type: 'folder'; name: string; added: number };
-export type PlacementData = { type: 'placement'; itemKind: 'score' | 'take'; itemId: string; folderId: string | null };
 export type ResourceKind = 'score' | 'settings' | 'organization';
 export type ResourceData = SavedScore | PracticeSettings | FolderData | PlacementData;
 export type RemoteResource = { kind: ResourceKind; id: string; data: ResourceData | null; revision: number; deleted: boolean };
@@ -470,62 +474,156 @@ function checkFolderId(id: string) { if (!uuidPattern.test(id)) throw new Error(
 function checkedItem(kind: 'score' | 'take', id: string) {
   if (kind === 'take' ? !uuidPattern.test(id) : !/^[A-Za-z0-9][A-Za-z0-9._-]{0,193}$/.test(id)) throw new Error('Identifiant invalide.');
 }
-export async function readOrganization(scope = activeScope): Promise<OrganizationSnapshot> {
-  const connection = await db();
-  const records = await requestValue<LocalResource[]>(connection.transaction('resources').objectStore('resources').index('scopeKind').getAll([scope, 'organization']));
-  const folders: LibraryFolder[] = [], placements: Record<string, string | null> = {};
+async function organizationInTransaction(tx: IDBTransaction, scope: string): Promise<Organization> {
+  const records = await requestValue<LocalResource[]>(tx.objectStore('resources').index('scopeKind').getAll([scope, 'organization']));
+  const folders: { id: string; data: FolderData }[] = [], placements: Record<string, PlacementData> = {};
   for (const record of records) {
     if (record.deleted || !record.data || !('type' in record.data)) continue;
-    const data = record.data;
-    if (data.type === 'folder' && record.id.startsWith('folder.')) folders.push({ id: record.id.slice(7), name: data.name, added: data.added });
-    else if (data.type === 'placement') placements[`${data.itemKind}:${data.itemId}`] = data.folderId;
+    if (record.data.type === 'folder') folders.push({ id: record.id.slice(7), data: record.data });
+    else if (record.data.type === 'placement') placements[`${record.data.itemKind}:${record.data.itemId}`] = record.data;
   }
-  folders.sort((a, b) => a.added - b.added || a.name.localeCompare(b.name));
-  return { folders, placements };
+  return projectOrganization({ folders, placements });
 }
-export function folderFor(snapshot: OrganizationSnapshot, kind: 'score' | 'take', id: string): string | null {
-  const folder = snapshot.placements[`${kind}:${id}`];
-  return folder && snapshot.folders.some(item => item.id === folder) ? folder : null;
+export async function readOrganization(scope = activeScope): Promise<Organization> {
+  const connection = await db();
+  return transaction(connection, ['resources'], 'readonly', tx => organizationInTransaction(tx, scope));
 }
-export async function createFolder(name: string, scope = activeScope): Promise<string> {
-  const id = crypto.randomUUID();
-  await writeResource('organization', `folder.${id}`, { type: 'folder', name: checkedFolderName(name), added: Date.now() }, scope);
-  return id;
+async function changeOrganization<T>(scope: string, operation: (tx: IDBTransaction, organization: Organization) => Promise<T>): Promise<T> {
+  const connection = await db();
+  const result = await transaction(connection, ['resources', 'outbox', 'meta'], 'readwrite', async tx => {
+    await assertAccountPresent(tx, scope);
+    return operation(tx, await organizationInTransaction(tx, scope));
+  });
+  changed(scope, 'write');
+  return result;
+}
+function activeFolder(organization: Organization, id: string) {
+  checkFolderId(id);
+  const folder = organization.folder(id);
+  if (!folder || folder.trashed) throw new Error('Dossier introuvable.');
+  return folder;
+}
+export async function createFolder(name: string, parentId: string | null = null, scope = activeScope): Promise<string> {
+  const value = checkedFolderName(name), id = crypto.randomUUID();
+  return changeOrganization(scope, async (tx, organization) => {
+    if (parentId !== null) activeFolder(organization, parentId);
+    await writeResourceInTransaction(tx, 'organization', `folder.${id}`, { type: 'folder', name: value, added: Date.now(), parentId }, scope);
+    return id;
+  });
 }
 export async function renameFolder(id: string, name: string, scope = activeScope): Promise<void> {
-  checkFolderId(id); const value = checkedFolderName(name), connection = await db();
-  await transaction(connection, ['resources', 'outbox', 'meta'], 'readwrite', async tx => {
-    const record = await requestValue<LocalResource | undefined>(tx.objectStore('resources').get(key(scope, 'organization', `folder.${id}`)));
-    if (!record || record.deleted || !record.data || !('type' in record.data) || record.data.type !== 'folder') throw new Error('Dossier introuvable.');
-    await writeResourceInTransaction(tx, 'organization', `folder.${id}`, { ...record.data, name: value }, scope);
+  const value = checkedFolderName(name);
+  return changeOrganization(scope, async (tx, organization) => {
+    const folder = activeFolder(organization, id);
+    await writeResourceInTransaction(tx, 'organization', `folder.${id}`, { ...folder.data, name: value }, scope);
   });
-  changed(scope, 'write');
 }
-export async function deleteFolder(id: string, scope = activeScope): Promise<void> {
-  checkFolderId(id); const connection = await db();
-  await transaction(connection, ['resources', 'outbox', 'meta'], 'readwrite', async tx => {
-    const records = await requestValue<LocalResource[]>(tx.objectStore('resources').index('scopeKind').getAll([scope, 'organization']));
-    await writeResourceInTransaction(tx, 'organization', `folder.${id}`, null, scope);
-    for (const record of records) if (!record.deleted && record.data && 'type' in record.data && record.data.type === 'placement' && record.data.folderId === id)
-      await writeResourceInTransaction(tx, 'organization', record.id, { ...record.data, folderId: null }, scope);
-  });
-  changed(scope, 'write');
-}
-export async function moveItem(kind: 'score' | 'take', id: string, folderId: string | null, scope = activeScope): Promise<void> {
-  checkedItem(kind, id); if (folderId !== null) checkFolderId(folderId);
-  const connection = await db();
-  await transaction(connection, ['resources', 'outbox', 'meta'], 'readwrite', async tx => {
-    if (folderId !== null) {
-      const folder = await requestValue<LocalResource | undefined>(tx.objectStore('resources').get(key(scope, 'organization', `folder.${folderId}`)));
-      if (!folder || folder.deleted || !folder.data || !('type' in folder.data) || folder.data.type !== 'folder') throw new Error('Dossier introuvable.');
+export async function moveFolder(id: string, parentId: string | null, scope = activeScope): Promise<void> {
+  return changeOrganization(scope, async (tx, organization) => {
+    const folder = activeFolder(organization, id);
+    if (parentId !== null) {
+      activeFolder(organization, parentId);
+      if (organization.contains(id, parentId)) throw new Error('Impossible de déplacer un dossier dans son propre sous-arbre.');
     }
-    await writeResourceInTransaction(tx, 'organization', `${kind}.${id}`, { type: 'placement', itemKind: kind, itemId: id, folderId }, scope);
+    await writeResourceInTransaction(tx, 'organization', `folder.${id}`, { ...folder.data, parentId }, scope);
+  });
+}
+export async function trashFolder(id: string, scope = activeScope): Promise<void> {
+  return changeOrganization(scope, async (tx, organization) => {
+    const folder = activeFolder(organization, id);
+    await writeResourceInTransaction(tx, 'organization', `folder.${id}`, { ...folder.data, trashedAt: Date.now() }, scope);
+  });
+}
+export async function restoreFolder(id: string, scope = activeScope): Promise<void> {
+  return changeOrganization(scope, async (tx, organization) => {
+    checkFolderId(id);
+    const folder = organization.folder(id);
+    if (!folder) throw new Error('Dossier introuvable.');
+    if (!folder.trashed) return;
+    const parent = folder.parentId === null ? undefined : organization.folder(folder.parentId);
+    await writeResourceInTransaction(tx, 'organization', `folder.${id}`, { ...folder.data, trashedAt: null, parentId: parent && !parent.trashed ? parent.id : null }, scope);
+  });
+}
+async function itemPlacement(tx: IDBTransaction, kind: ItemKind, id: string, scope: string): Promise<PlacementData> {
+  checkedItem(kind, id);
+  const record = await requestValue<LocalResource | undefined>(tx.objectStore('resources').get(key(scope, 'organization', `${kind}.${id}`)));
+  return record && !record.deleted && record.data && 'type' in record.data && record.data.type === 'placement'
+    ? record.data : { type: 'placement', itemKind: kind, itemId: id, folderId: null };
+}
+export async function moveItem(kind: ItemKind, id: string, folderId: string | null, scope = activeScope): Promise<void> {
+  return changeOrganization(scope, async (tx, organization) => {
+    if (folderId !== null) activeFolder(organization, folderId);
+    const placement = await itemPlacement(tx, kind, id, scope);
+    await writeResourceInTransaction(tx, 'organization', `${kind}.${id}`, { ...placement, folderId }, scope);
+  });
+}
+export async function trashItem(kind: ItemKind, id: string, scope = activeScope): Promise<void> {
+  return changeOrganization(scope, async tx => {
+    const placement = await itemPlacement(tx, kind, id, scope);
+    await writeResourceInTransaction(tx, 'organization', `${kind}.${id}`, { ...placement, trashedAt: placement.trashedAt ?? Date.now() }, scope);
+  });
+}
+export async function restoreItem(kind: ItemKind, id: string, scope = activeScope): Promise<void> {
+  return changeOrganization(scope, async (tx, organization) => {
+    if (organization.classify(kind, id).state !== 'trash') return;
+    const placement = await itemPlacement(tx, kind, id, scope);
+    const folderId = organization.classify(kind, id).folderId;
+    const folder = folderId === null ? undefined : organization.folder(folderId);
+    await writeResourceInTransaction(tx, 'organization', `${kind}.${id}`, { ...placement, trashedAt: null, folderId: folder && !folder.trashed ? folder.id : null }, scope);
+  });
+}
+async function deleteScoreInTransaction(tx: IDBTransaction, id: string, scope: string) {
+  await writeResourceInTransaction(tx, 'score', id, null, scope);
+  for (const [kind, resourceId] of [['settings', id], ['organization', `score.${id}`]] as const) {
+    const record = await requestValue<LocalResource | undefined>(tx.objectStore('resources').get(key(scope, kind, resourceId)));
+    if (record && !record.deleted) await writeResourceInTransaction(tx, kind, resourceId, null, scope);
+  }
+}
+/** Purge only the trash selected inside this transaction; use ordinary sync conflicts and take tombstones. */
+export async function purgeTrash(selection: OrganizationTarget | 'all', scope = activeScope): Promise<void> {
+  const connection = await db();
+  await transaction(connection, ['resources', 'takeData', 'takeIndex', 'outbox', 'meta'], 'readwrite', async tx => {
+    await assertAccountPresent(tx, scope);
+    const organization = await organizationInTransaction(tx, scope);
+    // Score keys include tombstones. Deleting an existing tombstone is a no-op;
+    // only selected score values are read by the ordinary deletion primitive.
+    const scoreKeys = await requestValue(tx.objectStore('resources').index('scopeKind').getAllKeys([scope, 'score']));
+    const takes = await requestValue<TakeIndex[]>(tx.objectStore('takeIndex').index('scope').getAll(scope));
+    const jobs = await requestValue<PendingTake[]>(tx.objectStore('outbox').getAll(IDBKeyRange.bound(key(scope, 'take', ''), key(scope, 'take', '\uffff'))));
+    const candidates = new Map<string, OrganizationItem>();
+    for (const recordKey of scoreKeys) {
+      const id = (recordKey as string[])[2];
+      candidates.set(`score:${id}`, { kind: 'score', id });
+    }
+    for (const take of takes) if (!take.deleted) candidates.set(`take:${take.id}`, { kind: 'take', id: take.id });
+    for (const job of jobs) if (job.operation === 'download') candidates.set(`take:${job.id}`, { kind: 'take', id: job.id });
+    const trash = organization.trash([...candidates.values()]);
+    const selected = selection === 'all' ? trash : trash.filter(item => item.kind === selection.kind && item.id === selection.id);
+    if (selection !== 'all' && !selected.length) throw new Error('Cet élément n’est pas dans la corbeille.');
+    const folders = new Set(selected.filter(item => item.kind === 'folder').map(item => item.id));
+    const includedFolder = (id: string | null) => id !== null && [...folders].some(root => organization.contains(root, id));
+    const items = [...candidates.values()].filter(item => selected.some(target => target.kind === item.kind && target.id === item.id) || includedFolder(organization.classify(item.kind, item.id).folderId));
+    for (const item of items) {
+      if (item.kind === 'score') await deleteScoreInTransaction(tx, item.id, scope);
+      else await deleteTakeInTransaction(tx, item.id, scope);
+    }
+    for (const folder of organization.folders) if (includedFolder(folder.id)) await writeResourceInTransaction(tx, 'organization', `folder.${folder.id}`, null, scope);
+    // Remove dangling placements in the purged subtree as well, without inventing missing files.
+    const records = await requestValue<LocalResource[]>(tx.objectStore('resources').index('scopeKind').getAll([scope, 'organization']));
+    for (const record of records) if (!record.deleted && record.data && 'type' in record.data && record.data.type === 'placement') {
+      const location = organization.classify(record.data.itemKind, record.data.itemId);
+      if (includedFolder(location.folderId) || (selection === 'all' && location.state === 'trash')) await writeResourceInTransaction(tx, 'organization', record.id, null, scope);
+    }
   });
   changed(scope, 'write');
 }
 export function saveScore(score: SavedScore, scope = activeScope) { return writeResource('score', score.id, score, scope); }
 export function writeSettings(id: string, settings: PracticeSettings, scope = activeScope) { return writeResource('settings', id, settings, scope); }
-export function deleteScore(id: string, scope = activeScope) { return writeResource('score', id, null, scope); }
+export async function deleteScore(id: string, scope = activeScope) {
+  const connection = await db();
+  await transaction(connection, ['resources', 'outbox', 'meta'], 'readwrite', tx => deleteScoreInTransaction(tx, id, scope));
+  changed(scope, 'write');
+}
 export async function syncQueue(scope: string): Promise<SyncJob[]> {
   const connection = await db();
   return requestValue(connection.transaction('outbox').objectStore('outbox').index('scope').getAll(scope));

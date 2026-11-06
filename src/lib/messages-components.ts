@@ -1,6 +1,8 @@
 // French source strings are keys; the original is the French fallback.
 export const componentMessages: Record<'en' | 'de' | 'nl', Record<string, string>> = {
   en: {
+    "Impossible de déplacer un dossier dans son propre sous-arbre.": "A folder cannot be moved into its own subtree.",
+    "Cet élément n’est pas dans la corbeille.": "This item is not in the trash.",
     "Langue de l’interface": "Interface language",
     "Langue sélectionnée : {language}": "Selected language: {language}",
     "Fermer le compte": "Close account",
@@ -58,7 +60,7 @@ export const componentMessages: Record<'en' | 'de' | 'nl', Record<string, string
     "Nom du dossier": "Folder name",
     "Enregistrer le dossier": "Save folder",
     "Annuler": "Cancel",
-    "Les partitions et essais seront conservés dans « Non classés ».": "Scores and takes will remain under “Unfiled”.",
+    "Le dossier et son contenu seront conservés dans la corbeille.": "The folder and its contents will be kept in the trash.",
     "Supprimer ce dossier": "Delete this folder",
     "Impossible de déplacer cet élément.": "Could not move this item.",
     "Dossier de {title}": "Folder for {title}",
@@ -133,6 +135,8 @@ export const componentMessages: Record<'en' | 'de' | 'nl', Record<string, string
     "Le son téléchargé ne correspond pas à l’essai.": "Downloaded audio does not match the take.",
   },
   de: {
+    "Impossible de déplacer un dossier dans son propre sous-arbre.": "Ein Ordner kann nicht in seinen eigenen Unterbaum verschoben werden.",
+    "Cet élément n’est pas dans la corbeille.": "Dieses Element befindet sich nicht im Papierkorb.",
     "Langue de l’interface": "Sprache der Oberfläche",
     "Langue sélectionnée : {language}": "Ausgewählte Sprache: {language}",
     "Fermer le compte": "Konto schließen",
@@ -190,7 +194,7 @@ export const componentMessages: Record<'en' | 'de' | 'nl', Record<string, string
     "Nom du dossier": "Ordnername",
     "Enregistrer le dossier": "Ordner speichern",
     "Annuler": "Abbrechen",
-    "Les partitions et essais seront conservés dans « Non classés ».": "Partituren und Aufnahmen bleiben unter „Nicht zugeordnet“ erhalten.",
+    "Le dossier et son contenu seront conservés dans la corbeille.": "Der Ordner und sein Inhalt bleiben im Papierkorb erhalten.",
     "Supprimer ce dossier": "Diesen Ordner löschen",
     "Impossible de déplacer cet élément.": "Dieses Element konnte nicht verschoben werden.",
     "Dossier de {title}": "Ordner für {title}",
@@ -265,6 +269,8 @@ export const componentMessages: Record<'en' | 'de' | 'nl', Record<string, string
     "Le son téléchargé ne correspond pas à l’essai.": "Die heruntergeladene Audiodatei gehört nicht zur Aufnahme.",
   },
   nl: {
+    "Impossible de déplacer un dossier dans son propre sous-arbre.": "Een map kan niet naar zijn eigen submappen worden verplaatst.",
+    "Cet élément n’est pas dans la corbeille.": "Dit item staat niet in de prullenbak.",
     "Langue de l’interface": "Interfacetaal",
     "Langue sélectionnée : {language}": "Geselecteerde taal: {language}",
     "Fermer le compte": "Account sluiten",
@@ -322,7 +328,7 @@ export const componentMessages: Record<'en' | 'de' | 'nl', Record<string, string
     "Nom du dossier": "Mapnaam",
     "Enregistrer le dossier": "Map opslaan",
     "Annuler": "Annuleren",
-    "Les partitions et essais seront conservés dans « Non classés ».": "Partituren en opnamen blijven onder ‘Niet ingedeeld’ bewaard.",
+    "Le dossier et son contenu seront conservés dans la corbeille.": "De map en de inhoud blijven in de prullenbak bewaard.",
     "Supprimer ce dossier": "Deze map verwijderen",
     "Impossible de déplacer cet élément.": "Dit item kon niet worden verplaatst.",
     "Dossier de {title}": "Map voor {title}",
