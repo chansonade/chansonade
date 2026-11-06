@@ -484,6 +484,17 @@ async function organizationInTransaction(tx: IDBTransaction, scope: string): Pro
   }
   return projectOrganization({ folders, placements });
 }
+async function organizationTakesInTransaction(tx: IDBTransaction, scope: string): Promise<{ id: string; title: string }[]> {
+  const takes = await requestValue<TakeIndex[]>(tx.objectStore('takeIndex').index('scope').getAll(scope));
+  const jobs = await requestValue<PendingTake[]>(tx.objectStore('outbox').getAll(IDBKeyRange.bound(key(scope, 'take', ''), key(scope, 'take', '\uffff'))));
+  const items = new Map(takes.filter(take => !take.deleted).map(take => [take.id, { id: take.id, title: take.title }]));
+  for (const job of jobs) if (job.operation === 'download') items.set(job.id, { id: job.id, title: job.title });
+  return [...items.values()];
+}
+/** Small inventory for trash, including remote takes not downloaded yet. */
+export async function organizationTakes(scope = activeScope) {
+  return transaction(await db(), ['takeIndex', 'outbox'], 'readonly', tx => organizationTakesInTransaction(tx, scope));
+}
 export async function readOrganization(scope = activeScope): Promise<Organization> {
   const connection = await db();
   return transaction(connection, ['resources'], 'readonly', tx => organizationInTransaction(tx, scope));
@@ -588,31 +599,27 @@ export async function purgeTrash(selection: OrganizationTarget | 'all', scope = 
     // Score keys include tombstones. Deleting an existing tombstone is a no-op;
     // only selected score values are read by the ordinary deletion primitive.
     const scoreKeys = await requestValue(tx.objectStore('resources').index('scopeKind').getAllKeys([scope, 'score']));
-    const takes = await requestValue<TakeIndex[]>(tx.objectStore('takeIndex').index('scope').getAll(scope));
-    const jobs = await requestValue<PendingTake[]>(tx.objectStore('outbox').getAll(IDBKeyRange.bound(key(scope, 'take', ''), key(scope, 'take', '\uffff'))));
+    const takes = await organizationTakesInTransaction(tx, scope);
     const candidates = new Map<string, OrganizationItem>();
     for (const recordKey of scoreKeys) {
       const id = (recordKey as string[])[2];
       candidates.set(`score:${id}`, { kind: 'score', id });
     }
-    for (const take of takes) if (!take.deleted) candidates.set(`take:${take.id}`, { kind: 'take', id: take.id });
-    for (const job of jobs) if (job.operation === 'download') candidates.set(`take:${job.id}`, { kind: 'take', id: job.id });
-    const trash = organization.trash([...candidates.values()]);
-    const selected = selection === 'all' ? trash : trash.filter(item => item.kind === selection.kind && item.id === selection.id);
-    if (selection !== 'all' && !selected.length) throw new Error('Cet élément n’est pas dans la corbeille.');
-    const folders = new Set(selected.filter(item => item.kind === 'folder').map(item => item.id));
-    const includedFolder = (id: string | null) => id !== null && [...folders].some(root => organization.contains(root, id));
-    const items = [...candidates.values()].filter(item => selected.some(target => target.kind === item.kind && target.id === item.id) || includedFolder(organization.classify(item.kind, item.id).folderId));
+    for (const take of takes) candidates.set(`take:${take.id}`, { kind: 'take', id: take.id });
+    const contents = organization.trashContents([...candidates.values()], selection);
+    if (selection !== 'all' && !contents.length) throw new Error('Cet élément n’est pas dans la corbeille.');
+    const folders = new Set(contents.filter(item => item.kind === 'folder').map(item => item.id));
+    const items = contents.filter((item): item is OrganizationItem => item.kind !== 'folder');
     for (const item of items) {
       if (item.kind === 'score') await deleteScoreInTransaction(tx, item.id, scope);
       else await deleteTakeInTransaction(tx, item.id, scope);
     }
-    for (const folder of organization.folders) if (includedFolder(folder.id)) await writeResourceInTransaction(tx, 'organization', `folder.${folder.id}`, null, scope);
+    for (const id of folders) await writeResourceInTransaction(tx, 'organization', `folder.${id}`, null, scope);
     // Remove dangling placements in the purged subtree as well, without inventing missing files.
     const records = await requestValue<LocalResource[]>(tx.objectStore('resources').index('scopeKind').getAll([scope, 'organization']));
     for (const record of records) if (!record.deleted && record.data && 'type' in record.data && record.data.type === 'placement') {
       const location = organization.classify(record.data.itemKind, record.data.itemId);
-      if (includedFolder(location.folderId) || (selection === 'all' && location.state === 'trash')) await writeResourceInTransaction(tx, 'organization', record.id, null, scope);
+      if (location.folderId !== null && folders.has(location.folderId) || (selection === 'all' && location.state === 'trash')) await writeResourceInTransaction(tx, 'organization', record.id, null, scope);
     }
   });
   changed(scope, 'write');

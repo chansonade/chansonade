@@ -80,8 +80,21 @@ export function projectOrganization(snapshot: OrganizationSnapshot = { folders: 
         .sort((a, b) => compare(`${a.kind}:${a.id}`, `${b.kind}:${b.id}`)),
     ];
   }
+  function trashContents(items: readonly OrganizationItem[], selection: OrganizationTarget | 'all'): OrganizationTarget[] {
+    const entries = trash(items);
+    if (selection === 'all') return entries;
+    if (!entries.some(item => item.kind === selection.kind && item.id === selection.id)) return [];
+    return entries.filter(item => item.kind === selection.kind && item.id === selection.id || selection.kind === 'folder'
+      && contains(selection.id, item.kind === 'folder' ? item.id : classify(item.kind, item.id).folderId));
+  }
+  function trashRoots(items: readonly OrganizationItem[]): OrganizationTarget[] {
+    return trash(items).filter(item => {
+      const parent = item.kind === 'folder' ? nodes.get(item.id)!.parentId : classify(item.kind, item.id).folderId;
+      return parent === null || !nodes.get(parent)!.trashed;
+    });
+  }
   return {
-    folders, roots, trash, classify, matches, contains, path,
+    folders, roots, trash, trashContents, trashRoots, classify, matches, contains, path,
     folder: (id: string) => nodes.get(id),
     destinations: (exclude?: string) => folders.filter(folder => !folder.trashed && (exclude === undefined || !contains(exclude, folder.id))),
   };

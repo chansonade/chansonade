@@ -21,7 +21,7 @@ micro. Le serveur de comptes et de synchronisation est facultatif et indépendan
 | `lib/theme.ts`, `lib/ThemeToggle.svelte` | Préférence système/clair/sombre et application de `data-theme` au document. |
 | `lib/catalog.ts`, `public/scores/catalog.json` | Catalogue public éditorialisé, identités de contenu, dossiers par répertoire/langue et provenance par édition. |
 | `lib/organization.ts` | Projection pure des dossiers imbriqués, chemins, destinations et classement actif/corbeille des partitions et essais. |
-| `lib/FolderControls.svelte`, `lib/ItemFolder.svelte` | Commandes et sélecteurs de dossiers personnels, communs aux partitions et essais. |
+| `lib/LibraryTree.svelte`, `lib/MoveItem.svelte`, `lib/LibraryDialog.svelte` | Arborescence personnelle, corbeille, déplacements et confirmations accessibles. |
 
 Les styles communs sont dans `style.css`, les styles propres aux composants dans
 leurs fichiers Svelte. Les ressources servies telles quelles sont dans `public/`.
@@ -126,8 +126,16 @@ de suppression, qui laissent inchangés les tombstones existants. Les résumés
 locaux et la plage des seuls transferts de prises complètent les candidats au
 vidage, y compris les téléchargements sans copie locale.
 Les noms identiques sont autorisés. Les parcours sont itératifs, sans limite de
-profondeur supplémentaire. Les sélecteurs actuels présentent des chemins ;
-l'arbre visuel et la vue corbeille sont une étape d'interface ultérieure.
+profondeur supplémentaire. La bibliothèque personnelle est une liste imbriquée de dossiers et partitions,
+avec boutons de dépliage distincts du dossier courant. La recherche affiche les
+ancêtres des résultats sans modifier le dépliage normal. Le dossier courant et
+le dépliage restent en mémoire dans l'interface et sont réinitialisés au changement
+de compte. Les essais restent chronologiques et partagent le dossier courant ;
+ils donnent accès à la même corbeille. Les déplacements utilisent un dialogue de
+chemins, sans glisser-déposer à ce stade. Les racines de corbeille et le contenu
+d'une purge sont calculés par la projection, pour des compteurs et confirmations
+communs à l'affichage et au stockage. L'inventaire inclut les prises distantes
+en attente de téléchargement, sans charger les XML ou WAV pour leur classement.
 
 Supprimer met à la corbeille et conserve les fichiers ; seule une suppression
 définitive confirmée les détruit. Mettre un dossier à la corbeille ne modifie

@@ -13,10 +13,9 @@
   import { t, locale, noteName } from './lib/i18n';
   import TakePanel from './lib/TakePanel.svelte';
   import { takeMoment, takePitchSamples, takePitchCount, takeTraceStarts } from './lib/take-playback';
-  import FolderControls from './lib/FolderControls.svelte';
-  import ItemFolder from './lib/ItemFolder.svelte';
+  import LibraryTree, { type LibraryNavigation } from './lib/LibraryTree.svelte';
   import { publicCatalog, catalogGroups, matchesSearch, type CatalogPiece, type CatalogGroup } from './lib/catalog';
-  import { readOrganization, moveItem, restoreItem } from './lib/storage';
+  import { readOrganization, organizationTakes, moveItem, restoreItem } from './lib/storage';
   import { projectOrganization, type Organization } from './lib/organization';
   import { measuresInLoop, canonicalLoopBounds } from './lib/loop';
   import { syncState, startSync, setTakeSyncPaused } from './lib/sync';
@@ -45,8 +44,8 @@
   let currentId = $state('');
   let currentXML = '';
   let documentScope = storageScope();
-  let libraryScope = storageScope();
-  let libraryRequest: Promise<[SavedScore[], Organization]> | null = null;
+  let libraryScope = $state(storageScope());
+  let libraryRequest: Promise<[SavedScore[], Organization, { id: string; title: string }[]]> | null = null;
   let practiceDirty = false;
   let practiceTouched = false;
   let documentStarted = false;
@@ -65,11 +64,16 @@
   let organization = $state<Organization>(projectOrganization());
   let libraryTab = $state<'personal'|'public'>('public');
   let libraryTabChosen = false;
-  let libraryFolder = $state('all');
+  let libraryNavigation = $state<LibraryNavigation>({ current: 'all', expanded: ['unfiled'] });
+  let libraryTakes = $state<{ id: string; title: string }[]>([]);
+  const activeScores = $derived(customScores.filter(score => organization.matches('score', score.id)));
+  $effect(() => {
+    if (!['all', 'unfiled', 'trash'].includes(libraryNavigation.current) && !organization.destinations().some(folder => folder.id === libraryNavigation.current)) libraryNavigation = { ...libraryNavigation, current: 'all' };
+  });
+  const trashCount = $derived(organization.trash([...customScores.map(score => ({ kind: 'score' as const, id: score.id })), ...libraryTakes.map(take => ({ kind: 'take' as const, id: take.id }))]).length);
   let librarySearch = $state('');
   let catalogGroup = $state<CatalogGroup>('children-fr');
   let addingPublic = $state(false);
-  const filteredScores = $derived(customScores.filter(score => matchesSearch(librarySearch,score.title,score.composer) && organization.matches('score',score.id,libraryFolder)));
   const filteredPublic = $derived(publicCatalog.filter(piece => piece.group === catalogGroup && matchesSearch(librarySearch,piece.title,piece.composer)));
   const currentPublicPiece = $derived(publicCatalog.find(piece => piece.id === currentId));
   let libraryOpen = $state(false);
@@ -439,7 +443,7 @@
       if (await scoreId(xml) !== piece.id) throw new Error('La partition ne correspond pas au catalogue.');
       if (!(await savedScores(scope)).some(score => score.id === piece.id)) await saveScore({id:piece.id,title:piece.title,composer:piece.composer,xml,added:Date.now()},scope);
       await restoreItem('score',piece.id,scope);
-      if (organization.destinations().some(folder => folder.id === libraryFolder)) await moveItem('score',piece.id,libraryFolder,scope);
+      if (organization.destinations().some(folder => folder.id === libraryNavigation.current)) await moveItem('score',piece.id,libraryNavigation.current,scope);
       await reloadLibrary(scope);
       notify('Partition ajoutée à votre bibliothèque.');
     } catch(cause) { notify(cause instanceof Error ? cause.message : 'Impossible d’ajouter cette partition.'); }
@@ -448,7 +452,7 @@
 
   function importFile(file?: File) {
     if (!file) return;
-    const folderId = organization.destinations().find(folder => folder.id === libraryFolder)?.id || null;
+    const folderId = organization.destinations().find(folder => folder.id === libraryNavigation.current)?.id || null;
     if (fileInput) fileInput.value = '';
     return chooseScore({ kind: 'file', file, folderId });
   }
@@ -946,11 +950,11 @@
   }
 
   async function reloadLibrary(scope = storageScope()) {
-    const request = Promise.all([savedScores(scope), readOrganization(scope)]);
+    const request = Promise.all([savedScores(scope), readOrganization(scope), organizationTakes(scope)]);
     libraryRequest = request;
-    const [stored,folders] = await request;
+    const [stored,folders,takes] = await request;
     const scores = stored.filter(score => folders.matches('score', score.id));
-    if (!disposed && request === libraryRequest && scope === storageScope()) { customScores = scores; organization = folders; libraryScope = scope; if(!libraryTabChosen && scores.length) libraryTab = 'personal'; }
+    if (!disposed && request === libraryRequest && scope === storageScope()) { customScores = stored; organization = folders; libraryTakes = takes; libraryScope = scope; if(!libraryTabChosen && scores.length) libraryTab = 'personal'; }
     return scores;
   }
   function openSavedScore(saved: SavedScore) {
@@ -965,7 +969,6 @@
     music = null; pages = []; geometry = null; currentXML = ''; currentId = '';
     title = 'Ouvrir une partition'; composer = ''; subtitle = '';
     documentScope = scope; defaultParts = []; parts = [];
-    organization = projectOrganization(); libraryFolder = 'all'; librarySearch = ''; libraryTabChosen = false;
     practiceDirty = false; practiceTouched = false; documentStarted = false;
     clearPitchTrace(); captureTimeline.reset();
   }
@@ -1014,6 +1017,8 @@
       if (event.scope !== storageScope()) return;
       if (event.reason === 'scope') {
         stopReplay(); showTake(null); takeScope = event.scope;
+        customScores = []; libraryTakes = []; organization = projectOrganization(); libraryScope = event.scope;
+        libraryNavigation = { current: 'all', expanded: ['unfiled'] }; librarySearch = ''; libraryTabChosen = false;
         void chooseScore({ kind: 'library', lastId: currentId });
       }
       else {
@@ -1107,7 +1112,7 @@
               rel="noopener noreferrer"
             >{currentPublicPiece.license === 'CC0-1.0' ? 'CC0' : 'CC BY-SA'}</a>
           </span>
-          {#if !customScores.some(score => score.id === currentId)}
+          {#if !activeScores.some(score => score.id === currentId)}
             <button
               class="add-current-score"
               disabled={addingPublic || takePhase !== 'idle'}
@@ -1173,6 +1178,7 @@
             class:active={libraryTab === 'personal'}
             onclick={() => { libraryTab = 'personal'; libraryTabChosen = true; }}>{$t("Mes partitions")}</button>
         </div>
+        {#if libraryTab !== 'personal' || libraryNavigation.current !== 'trash'}
         <input
           class="library-search"
           type="search"
@@ -1180,58 +1186,17 @@
           placeholder={$t("Rechercher une partition")}
           bind:value={librarySearch}
         />
+        {/if}
         {#if libraryTab === 'personal'}
-          <button class="import-button" onclick={() => fileInput.click()}>
+          <button class="import-button" disabled={libraryNavigation.current === 'trash'} onclick={() => fileInput.click()}>
             <Plus size={17} /> {$t("Importer une partition")}
             <span>XML</span>
           </button>
-          <FolderControls
-            {organization}
-            bind:selected={libraryFolder}
-            onrefresh={() => reloadLibrary()}
-            onerror={notify}
-            blocked={takePhase !== 'idle'}
-          />
-          <div class="library-label">
-            {$t("MES PARTITIONS")}
-            <span>{filteredScores.length}</span>
-          </div>
-          {#each filteredScores as saved}
-            <div class="saved-piece">
-              <button
-                class="piece"
-                class:chosen={currentId === saved.id}
-                onclick={() => void openSavedScore(saved)}
-              >
-                <span class="piece-number">
-                  <Music2 size={16} />
-                </span
-                ><span
-                  class="piece-description"
-                >
-                  <strong>{saved.title}</strong
-                  ><small>{saved.composer}</small>
-                </span
-                >{#if currentId === saved.id}
-                  <span class="piece-dot"></span>
-                {/if}
-              </button
-              ><div class="saved-piece-folder">
-                <ItemFolder
-                  {organization}
-                  kind="score"
-                  id={saved.id}
-                  title={saved.title}
-                  onerror={notify}
-                  blocked={takePhase !== 'idle'}
-                />
-              </div>
-            </div>
-          {/each}
-          {#if !filteredScores.length}
-            <p class="library-empty"
-            >{customScores.length ? $t('Aucune partition dans cette sélection.') : $t('Ajoutez un morceau du catalogue public ou importez votre partition.')}</p>
-          {/if}
+          {#key libraryScope}
+            <LibraryTree {organization} scores={customScores} takes={libraryTakes} scope={libraryScope} {currentId}
+              bind:navigation={libraryNavigation} bind:search={librarySearch} blocked={takePhase !== 'idle'}
+              onopen={openSavedScore} onerror={notify} />
+          {/key}
         {:else}
           <label class="catalog-folder-label" for="catalog-folder">{$t("Dossier public")}</label
           ><select id="catalog-folder" aria-label={$t("Dossier public")} bind:value={catalogGroup}>
@@ -1284,10 +1249,10 @@
               ><div class="catalog-piece-actions">
                 <span>{piece.license === 'CC0-1.0' ? 'CC0' : 'CC BY-SA'}</span
                 ><button
-                  disabled={addingPublic || takePhase !== 'idle' || customScores.some(score => score.id === piece.id)}
+                  disabled={addingPublic || takePhase !== 'idle' || activeScores.some(score => score.id === piece.id)}
                   onclick={() => void addPublicPiece(piece)}
                 >
-                  {#if customScores.some(score => score.id === piece.id)}
+                  {#if activeScores.some(score => score.id === piece.id)}
                     <Check size={13} />
                     {$t("Dans ma bibliothèque")}
                   {:else}
@@ -2129,6 +2094,10 @@
   {/if}
   {#if takesOpen}
     <TakePanel
+      {organization}
+      bind:current={libraryNavigation.current}
+      {trashCount}
+      ontrash={() => { takesOpen = false; libraryNavigation = { ...libraryNavigation, current: 'trash' }; libraryTab = 'personal'; libraryTabChosen = true; libraryOpen = true; librarySearch = ''; }}
       memoryTakes={memoryTakes.filter(entry => entry.scope === takeScope).map(entry => entry.take)}
       ondiscard={id => memoryTakes = memoryTakes.filter(entry => entry.scope !== takeScope || entry.take.id !== id)}
       onclose={() => takesOpen = false}

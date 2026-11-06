@@ -8,8 +8,8 @@ const browser = await chromium.connectOverCDP(process.env.CHANSONADE_TEST_CDP ||
 const contexts = [];
 const errors = [];
 
-async function isolatedContext(account = null) {
-  const context = await browser.newContext({ locale: 'fr-BE', viewport: { width: 1150, height: 850 }, serviceWorkers: 'block' });
+async function isolatedContext(account = null, options = {}) {
+  const context = await browser.newContext({ locale: 'fr-BE', viewport: { width: 1150, height: 850 }, serviceWorkers: 'block', ...options });
   contexts.push(context);
   context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
   await context.addInitScript(({ account }) => {
@@ -1438,7 +1438,7 @@ try {
   assert.deepEqual(capturedScopes, [1, 0]);
   console.log('PASS browser: latest opening wins across startup, catalogue success/errors, import reads/hash, saved library, engraving/audio and A-B-A account changes; account opening waits for capture saved in its original scope');
 
-  const organizationContext = await isolatedContext();
+  const organizationContext = await isolatedContext(null, { hasTouch: true });
   await organizationContext.route('**/api/v1/**', route => route.fulfill({ json: { user: null, registration: 'open' } }));
   const organizationPage = await organizationContext.newPage();
   await organizationPage.goto(url); await ready(organizationPage);
@@ -1613,53 +1613,193 @@ try {
   assert.equal(organizationResult.scope, 'user:organization-a');
   console.log('PASS organization storage: no score/settings/XML-outbox value reads for classification, only targeted purge reads, remote downloads and existing tombstones; hierarchy, preserved fields, trash/restore, capture inheritance, latest take, atomic purge/rollback, ordinary outbox/take tombstones and scoped anonymous adoption');
 
-  await organizationPage.getByRole('button', { name: 'Bibliothèque', exact: true }).click();
-  await organizationPage.getByRole('button', { name: 'Mes partitions', exact: true }).click();
-  const folders = organizationPage.getByRole('combobox', { name: 'Filtrer par dossier', exact: true });
-  async function createOrganizationFolder(name) {
-    await organizationPage.getByRole('button', { name: 'Créer un dossier', exact: true }).click();
-    await organizationPage.getByRole('textbox', { name: 'Nom du dossier', exact: true }).fill(name);
-    await organizationPage.getByRole('button', { name: 'Enregistrer le dossier', exact: true }).click();
-    await organizationPage.getByRole('textbox', { name: 'Nom du dossier', exact: true }).waitFor({ state: 'detached' });
+  async function openOrganizationLibrary() {
+    if (!await organizationPage.locator('.library-panel').count()) await organizationPage.getByRole('button', { name: 'Bibliothèque', exact: true }).click();
+    await organizationPage.getByRole('button', { name: 'Mes partitions', exact: true }).click();
   }
-  await createOrganizationFolder('UI parent');
-  assert.equal(await folders.inputValue(), 'all', 'Creating a folder does not enter it');
-  await folders.selectOption({ label: 'UI parent' });
-  const parent = await folders.inputValue();
-  await createOrganizationFolder('UI child');
-  assert.equal(await folders.inputValue(), parent);
-  assert.equal(await folders.locator('option').filter({ hasText: 'UI parent / UI child' }).count(), 1);
-  await organizationPage.locator('input[type=file]').setInputFiles({ name: 'organization.musicxml', mimeType: 'application/xml', buffer: Buffer.from(syntheticXML('UI organization')) });
-  await ready(organizationPage);
-  await organizationPage.waitForFunction(() => document.querySelector('h1')?.textContent === 'UI organization');
-  if (!await organizationPage.locator('.library-panel').count()) await organizationPage.getByRole('button', { name: 'Bibliothèque', exact: true }).click();
-  await organizationPage.getByRole('button', { name: 'Supprimer le dossier', exact: true }).click();
-  await organizationPage.getByText('Le dossier et son contenu seront conservés dans la corbeille.', { exact: true }).waitFor();
-  await organizationPage.getByRole('button', { name: 'Supprimer ce dossier', exact: true }).click();
-  await organizationPage.waitForFunction(() => ![...document.querySelectorAll('.saved-piece strong')].some(node => node.textContent === 'UI organization'));
-  assert.equal(await folders.locator('option').filter({ hasText: 'UI parent' }).count(), 0);
-  await organizationPage.reload(); await ready(organizationPage);
-  assert.notEqual(await organizationPage.locator('h1').innerText(), 'UI organization', 'Startup cannot reopen a trashed personal score');
-  await organizationPage.evaluate(async () => {
-    const s = await import('/src/lib/storage.ts'), { publicCatalog } = await import('/src/lib/catalog.ts');
-    await s.trashItem('score', publicCatalog[0].id);
-    localStorage.setItem('chansonade.last', publicCatalog[0].id);
-    window.__hiddenPublicScore = publicCatalog[0].id;
-  });
-  const hiddenPublic = await organizationPage.evaluate(() => window.__hiddenPublicScore);
-  await organizationPage.reload(); await ready(organizationPage);
-  assert.notEqual(await organizationPage.evaluate(() => localStorage.getItem('chansonade.last')), hiddenPublic, 'Startup fallback must not reopen the same public identity through the catalogue');
-  await organizationPage.evaluate(async ({ adopted }) => {
-    const s = await import('/src/lib/storage.ts'); s.setStorageScope(adopted);
-    window.__organizationExpectedScope = adopted;
-  }, organizationResult);
-  await ready(organizationPage);
-  await organizationPage.getByRole('button', { name: 'Bibliothèque', exact: true }).click();
-  await organizationPage.getByRole('button', { name: 'Mes partitions', exact: true }).click();
-  assert.equal(await organizationPage.evaluate(async () => (await import('/src/lib/storage.ts')).storageScope()), organizationResult.adopted);
-  assert.equal(await organizationPage.locator('.saved-piece').count(), 0, 'Account switch must not reveal its trashed adopted library');
-  assert.equal(await organizationPage.getByRole('combobox', { name: 'Filtrer par dossier', exact: true }).locator('option').count(), 2, 'The old account folders and adopted trash are excluded');
-  console.log('PASS organization UI: create in place, path selectors, soft folder deletion, persistent startup exclusions (personal/public identity) and account change');
+  const tree = organizationPage.locator('.library-tree');
+  const folderNode = id => tree.locator(`li[data-folder-id="${id}"]`);
+  const fileNode = (id, kind = 'score') => tree.locator(`li[data-kind="${kind}"][data-id="${id}"]`);
+  const selectFolder = id => folderNode(id).locator('> .tree-row .folder-select').click();
+  const toggleFolder = id => folderNode(id).locator('> .tree-row .disclosure').click();
+  const menuFor = node => node.locator('> .tree-row .more').click();
+  async function createOrganizationFolder(name) {
+    await tree.getByRole('button', { name: 'Créer un dossier', exact: true }).click();
+    const dialog = organizationPage.getByRole('dialog', { name: 'Créer un dossier', exact: true });
+    await dialog.getByRole('textbox', { name: 'Nom du dossier', exact: true }).fill(name);
+    await dialog.getByRole('button', { name: 'Enregistrer le dossier', exact: true }).click();
+    await dialog.waitFor({ state: 'detached' });
+    await organizationPage.waitForFunction(async name => (await (await import('/src/lib/storage.ts')).readOrganization()).folders.some(folder => folder.data.name === name), name);
+    return organizationPage.evaluate(async name => (await (await import('/src/lib/storage.ts')).readOrganization()).folders.find(folder => folder.data.name === name).id, name);
+  }
+  async function importOrganization(title) {
+    await organizationPage.locator('input[type=file]').setInputFiles({ name: `${title}.musicxml`, mimeType: 'application/xml', buffer: Buffer.from(syntheticXML(title)) });
+    await organizationPage.waitForFunction(title => document.querySelector('h1')?.textContent === title && document.querySelector('.transport .play-button')?.disabled === false, title);
+    await openOrganizationLibrary();
+    return organizationPage.evaluate(async title => (await (await import('/src/lib/storage.ts')).savedScores()).find(score => score.title === title).id, title);
+  }
+  async function moveWithKeyboard(node, title, destination) {
+    await menuFor(node);
+    const button = node.getByRole('button', { name: `Déplacer « ${title} » vers…`, exact: true });
+    await button.focus(); await button.press('Enter');
+    const dialog = organizationPage.getByRole('dialog', { name: `Déplacer « ${title} » vers…`, exact: true });
+    const select = dialog.getByRole('combobox', { name: 'Dossier de destination', exact: true });
+    const values = await select.locator('option').evaluateAll(options => options.map(option => option.value));
+    const folderId = await node.getAttribute('data-folder-id');
+    if (folderId) assert(!values.includes(folderId), 'A folder is excluded from its own destinations');
+    await select.focus(); await select.press('Home');
+    for (let index = 0; index < values.indexOf(destination); index++) await select.press('ArrowDown');
+    assert.equal(await select.inputValue(), destination);
+    const submit = dialog.getByRole('button', { name: 'Déplacer', exact: true });
+    await submit.focus(); await submit.press('Enter'); await dialog.waitFor({ state: 'detached' });
+    assert(await organizationPage.evaluate(() => !!document.activeElement?.closest('.library-panel')), 'Closing a move dialog returns focus to the library');
+  }
+  async function trashWithMenu(node) { await menuFor(node); await node.getByRole('button', { name: 'Mettre à la corbeille', exact: true }).click(); }
+  async function restoreWithMenu(node) { await menuFor(node); await node.getByRole('button', { name: 'Restaurer', exact: true }).click(); }
+  await openOrganizationLibrary();
+  const parent = await createOrganizationFolder('UI parent');
+  assert.equal(await tree.locator('.root-select').getAttribute('aria-current'), 'location', 'Creation does not navigate');
+  assert.equal(await folderNode(parent).locator('> .tree-row .disclosure').getAttribute('aria-expanded'), 'false');
+  await selectFolder(parent);
+  assert.equal(await folderNode(parent).locator('> .tree-row .disclosure').getAttribute('aria-expanded'), 'false', 'Current folder and disclosure are separate');
+  const child = await createOrganizationFolder('UI child');
+  assert.equal(await folderNode(parent).locator('> .tree-row .folder-select').getAttribute('aria-current'), 'location');
+  assert.equal(await folderNode(parent).locator('> .tree-row .disclosure').getAttribute('aria-expanded'), 'true', 'Creation reveals the child in its parent');
+  await folderNode(child).waitFor();
+  const alpha = await importOrganization('UI Alpha');
+  await selectFolder(child);
+  const needle = await importOrganization('UI Needle');
+  assert.equal(await folderNode(child).locator('> .tree-row .disclosure').getAttribute('aria-expanded'), 'false');
+  await toggleFolder(child); await fileNode(needle).waitFor();
+  await selectFolder(parent);
+  const empty = await createOrganizationFolder('UI empty');
+  await menuFor(folderNode(empty)); await folderNode(empty).getByRole('button', { name: 'Renommer le dossier', exact: true }).click();
+  await organizationPage.getByRole('dialog').getByRole('textbox').fill('UI renamed');
+  await organizationPage.getByRole('dialog').getByRole('button', { name: 'Enregistrer le dossier', exact: true }).click();
+  await organizationPage.getByRole('dialog').waitFor({ state: 'detached' });
+  await folderNode(empty).getByText('UI renamed', { exact: true }).waitFor();
+  await tree.locator('.root-select').click();
+  const destination = await createOrganizationFolder('UI target');
+  await moveWithKeyboard(fileNode(alpha), 'UI Alpha', destination);
+  await moveWithKeyboard(folderNode(child), 'UI child', destination);
+  assert.equal(await folderNode(destination).locator('> .tree-row .disclosure').getAttribute('aria-expanded'), 'false');
+  await organizationPage.getByRole('searchbox', { name: 'Rechercher une partition', exact: true }).fill('Needle');
+  await fileNode(needle).waitFor();
+  assert.equal(await fileNode(alpha).count(), 0);
+  assert.equal(await folderNode(destination).locator('> .tree-row .disclosure').getAttribute('aria-expanded'), 'true');
+  await organizationPage.getByRole('searchbox', { name: 'Rechercher une partition', exact: true }).fill('');
+  assert.equal(await folderNode(destination).locator('> .tree-row .disclosure').getAttribute('aria-expanded'), 'false', 'Search never changes normal expansion');
+  const uiTake = await organizationPage.evaluate(async ({ needle, xml }) => {
+    const s = await import('/src/lib/storage.ts'), { microphoneWav } = await import('/src/lib/wav.ts');
+    const id = crypto.randomUUID(), settings = { rate: 1, loopA: null, loopB: null, loopEnabled: false, target: 0, parts: [] };
+    await s.saveTake({ id, createdAt: 1, title: 'UI Take', scoreId: needle, scoreXML: xml, duration: 64 / 48000, sampleRate: 48000, samples: 64, captureStartedAt: 0, settings, latencyMs: 0, detector: { name: 'Synthetic' }, pitches: [], transport: [], audio: microphoneWav([new Float32Array(64)], 48000) });
+    return id;
+  }, { needle, xml: syntheticXML('UI Needle') });
+  await trashWithMenu(folderNode(destination));
+  await folderNode(destination).waitFor({ state: 'detached' });
+  await tree.locator('.trash-select').click();
+  await tree.locator('.trash-list > .folder-entry').waitFor();
+  assert.equal(await organizationPage.getByRole('searchbox', { name: 'Rechercher une partition', exact: true }).count(), 0, 'Library search excludes the trash view');
+  assert.equal(await tree.locator('.trash-list > li').count(), 1, 'Trash lists subtree roots without duplicating their files');
+  await toggleFolder(destination); await fileNode(alpha).waitFor(); await fileNode(needle).waitFor();
+  assert.equal(await fileNode(uiTake, 'take').count(), 1);
+  await restoreWithMenu(folderNode(child));
+  await folderNode(child).waitFor({ state: 'detached' });
+  assert.equal(await organizationPage.evaluate(async id => (await (await import('/src/lib/storage.ts')).readOrganization()).folder(id).parentId, child), null, 'Restoring under a trashed ancestor detaches');
+  await restoreWithMenu(folderNode(destination));
+  await tree.getByText('La corbeille est vide.', { exact: true }).waitFor();
+  await tree.locator('.root-select').click(); await fileNode(alpha).waitFor();
+  await trashWithMenu(fileNode(alpha)); await fileNode(alpha).waitFor({ state: 'detached' });
+  await tree.locator('.trash-select').click(); await fileNode(alpha).waitFor();
+  assert.equal(await tree.locator('.trash-list > li').count(), 1, 'A score can be trashed alone');
+  assert(await organizationPage.evaluate(async id => !!await (await import('/src/lib/storage.ts')).getTake(id), uiTake));
+  await organizationPage.evaluate(async id => {
+    const s = await import('/src/lib/storage.ts');
+    await s.applyRemoteChanges(s.storageScope(), [{ kind: 'organization', id: `folder.${id}`, data: null, revision: 100, deleted: true }], 100);
+  }, destination);
+  await restoreWithMenu(fileNode(alpha));
+  await tree.locator('.root-select').click(); await fileNode(alpha).waitFor();
+  assert.equal(await organizationPage.evaluate(async id => (await (await import('/src/lib/storage.ts')).readOrganization()).classify('score', id).state, alpha), 'unfiled', 'Restoration handles a missing parent');
+  await selectFolder(child);
+  await organizationPage.locator('.library-panel').getByRole('button', { name: 'Fermer la bibliothèque', exact: true }).click();
+  await organizationPage.getByRole('button', { name: 'Enregistrements', exact: true }).click();
+  const takeCard = organizationPage.locator('.take-card').filter({ hasText: 'UI Take' }); await takeCard.waitFor();
+  await takeCard.getByRole('button', { name: 'Supprimer cet essai', exact: true }).click();
+  await takeCard.getByRole('button', { name: 'Confirmer la suppression', exact: true }).click();
+  await takeCard.waitFor({ state: 'detached' });
+  assert(await organizationPage.evaluate(async id => !!await (await import('/src/lib/storage.ts')).getTake(id), uiTake), 'Trashing a take keeps its WAV');
+  await organizationPage.evaluate(async id => (await import('/src/lib/storage.ts')).trashFolder(id), child);
+  await organizationPage.waitForFunction(() => document.querySelector('#take-folder')?.value === 'all');
+  await organizationPage.evaluate(async id => (await import('/src/lib/storage.ts')).restoreFolder(id), child);
+  await organizationPage.locator('.take-panel .trash-link').click();
+  await fileNode(uiTake, 'take').waitFor(); await restoreWithMenu(fileNode(uiTake, 'take'));
+  await tree.locator('.root-select').click();
+  await trashWithMenu(folderNode(parent)); await folderNode(parent).waitFor({ state: 'detached' });
+  await trashWithMenu(fileNode(alpha)); await fileNode(alpha).waitFor({ state: 'detached' });
+  await organizationPage.evaluate(async ({ uiTake, alpha }) => {
+    const s = await import('/src/lib/storage.ts');
+    await s.writeSettings(alpha, { rate: 1, loopA: null, loopB: null, loopEnabled: false, target: 0, parts: [] });
+    await s.trashItem('take', uiTake);
+    await s.saveScore({ id: 'ui-discard', title: 'UI Discard', composer: '', xml: '<score-partwise/>', added: 2 });
+  }, { uiTake, alpha });
+  await fileNode('ui-discard').waitFor(); await trashWithMenu(fileNode('ui-discard')); await tree.locator('.trash-select').click();
+  await fileNode('ui-discard').waitFor(); await menuFor(fileNode('ui-discard'));
+  await fileNode('ui-discard').getByRole('button', { name: 'Supprimer définitivement', exact: true }).click();
+  await organizationPage.getByRole('dialog').getByText('Dossiers : 0 · Partitions : 1 · Essais : 0', { exact: true }).waitFor();
+  await organizationPage.getByRole('dialog').getByRole('button', { name: 'Confirmer la suppression définitive', exact: true }).click();
+  await organizationPage.getByRole('dialog').waitFor({ state: 'detached' });
+  await tree.locator('.empty-trash').click();
+  await organizationPage.getByRole('dialog').getByText('Dossiers : 2 · Partitions : 1 · Essais : 1', { exact: true }).waitFor();
+  await organizationPage.getByRole('dialog').getByRole('button', { name: 'Annuler', exact: true }).click();
+  assert(await organizationPage.evaluate(async id => !!await (await import('/src/lib/storage.ts')).getTake(id), uiTake), 'Cancelling the confirmation preserves data');
+  await tree.locator('.empty-trash').click();
+  await organizationPage.getByRole('dialog').getByRole('button', { name: 'Confirmer la suppression définitive', exact: true }).click();
+  await organizationPage.getByRole('dialog').waitFor({ state: 'detached' });
+  await tree.getByText('La corbeille est vide.', { exact: true }).waitFor();
+  assert.deepEqual(await organizationPage.evaluate(async ({ alpha, needle, uiTake }) => {
+    const s = await import('/src/lib/storage.ts');
+    return [(await s.savedScores()).some(score => score.id === alpha), (await s.savedScores()).some(score => score.id === needle), !!await s.readSettings(alpha), !!await s.getTake(uiTake)];
+  }, { alpha, needle, uiTake }), [false, true, false, false]);
+  await organizationPage.reload(); await ready(organizationPage); await openOrganizationLibrary();
+  assert.equal(await folderNode(child).locator('> .tree-row .disclosure').getAttribute('aria-expanded'), 'false');
+  await toggleFolder(child); await fileNode(needle).waitFor();
+  assert.equal(await fileNode(alpha).count(), 0, 'Deletion persists after reload');
+  for (const [width, height, theme] of [[350, 760, 'light'], [740, 350, 'dark']]) {
+    await organizationPage.setViewportSize({ width, height });
+    await organizationPage.locator('.library-panel').waitFor({ state: 'detached' });
+    await organizationPage.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
+    await openOrganizationLibrary(); await tree.locator('.trash-select').scrollIntoViewIfNeeded();
+    const layout = await organizationPage.locator('.library-panel').evaluate(panel => ({ width: panel.getBoundingClientRect().width, client: panel.clientWidth, scroll: panel.scrollWidth, targets: [...panel.querySelectorAll('button')].filter(button => button.getClientRects().length).map(button => [button.getBoundingClientRect().width, button.getBoundingClientRect().height]) }));
+    assert(layout.width <= width && layout.scroll <= layout.client + 1, 'The panel has no horizontal overflow');
+    assert(layout.targets.every(([w, h]) => w >= 43.9 && h >= 43.9), JSON.stringify(layout.targets));
+    await organizationPage.screenshot({ path: `/tmp/chansonade-library-${width}.png` });
+    await tree.locator('.trash-select').tap();
+    await tree.getByText('La corbeille est vide.', { exact: true }).waitFor();
+    await tree.locator('.root-select').tap();
+  }
+  await organizationPage.setViewportSize({ width: 1150, height: 850 });
+  await menuFor(fileNode(needle));
+  await fileNode(needle).getByRole('button', { name: 'Déplacer « UI Needle » vers…', exact: true }).click();
+  await organizationPage.getByRole('dialog').waitFor();
+  await organizationPage.evaluate(async ({ adopted }) => { const s = await import('/src/lib/storage.ts'); s.setStorageScope(adopted); }, organizationResult);
+  await organizationPage.getByRole('dialog').waitFor({ state: 'detached' });
+  await ready(organizationPage); await openOrganizationLibrary();
+  assert.equal(await tree.locator('.root-select').getAttribute('aria-current'), 'location');
+  assert.equal(await tree.locator('.file-entry').count(), 0, 'Account change excludes its adopted trash');
+  await tree.locator('.trash-select').click();
+  assert.equal(await tree.locator('.trash-list > .folder-entry').count(), 1);
+  assert.equal(await tree.locator('.trash-list > .folder-entry > .tree-row .disclosure').getAttribute('aria-expanded'), 'false', 'Account change resets expansion');
+  for (const language of ['en', 'de', 'nl']) {
+    const translated = await organizationPage.evaluate(async language => {
+      const i = await import('/src/lib/i18n.ts'); i.setLanguage(language);
+      const keys = ['Corbeille', 'Déplacer vers…', 'Dossier courant : {path}', 'Supprimer définitivement', 'Vider la corbeille', 'Confirmer la suppression définitive', 'Déplier ou replier « {title} »'];
+      return keys.map(key => [key, i.translate(key)]);
+    }, language);
+    assert(translated.every(([key, value]) => key !== value), JSON.stringify(translated));
+    await organizationPage.waitForFunction(text => document.querySelector('.trash-select')?.textContent.includes(text), translated[0][1]);
+    assert((await tree.locator('.empty-trash').innerText()).includes(translated[4][1]));
+  }
+  console.log('PASS organization UI: separate current/disclosure, create in place, empty folders, rename, keyboard moves, global search without expansion changes, subtree/item/take trash and restore, missing parents, counted permanent deletion/cancellation, persistence, accounts, 44px portrait/landscape and EN/DE/NL');
 
   assert.deepEqual(errors, [], 'No unhandled browser errors');
 } finally {

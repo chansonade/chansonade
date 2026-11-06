@@ -43,6 +43,9 @@ assert.equal(folderFor(projected, 'score', 'x'), null, 'Trash is never inherited
 assert.deepEqual(projected.destinations('d').map(folder => folder.id), ['self']);
 assert.deepEqual(projected.trash([...items].reverse()), projected.trash(items), 'Inventory order does not change the projected trash');
 assert.equal(projected.trash(items).length, 5, 'Three folders and two existing files, without a ghost placement');
+assert.deepEqual(projected.trashRoots(items), [{ kind: 'folder', id: 'a' }, { kind: 'score', id: 'z' }]);
+assert.deepEqual(projected.trashContents(items, { kind: 'folder', id: 'a' }), [{ kind: 'folder', id: 'a' }, { kind: 'folder', id: 'b' }, { kind: 'folder', id: 'c' }, { kind: 'score', id: 'x' }]);
+assert.deepEqual(projected.trashContents(items, { kind: 'score', id: 'y' }), []);
 for (let rotation = 0; rotation < snapshot.folders.length; rotation++) {
   const rotated = [...snapshot.folders.slice(rotation), ...snapshot.folders.slice(0, rotation)];
   for (const folders of [rotated, [...rotated].reverse()]) {

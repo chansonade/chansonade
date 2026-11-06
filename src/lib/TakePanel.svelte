@@ -4,26 +4,22 @@
   import { X, Play, Download, Trash2, Cloud, HardDrive, LoaderCircle, AudioLines } from '@lucide/svelte';
   import { listTakes, getTake, trashItem, storageScope, subscribeStorage, type RecordedTake, type TakeSummary } from './storage';
   import { syncState } from './sync';
-  import { readOrganization } from './storage';
-  import { projectOrganization, type Organization } from './organization';
-  import FolderControls from './FolderControls.svelte';
-  import ItemFolder from './ItemFolder.svelte';
+  import type { Organization } from './organization';
+  import MoveItem from './MoveItem.svelte';
   import { matchesSearch } from './catalog';
-  let { onclose, onplay, onexport, onerror, ondiscard, memoryTakes = [], blocked = false }: { onclose: () => void; onplay: (take: RecordedTake) => Promise<void>; onexport: (take: RecordedTake) => void; onerror: (message: string) => void; ondiscard: (id: string) => void; memoryTakes?: RecordedTake[]; blocked?: boolean } = $props();
+  let { organization, current = $bindable('all'), trashCount, ontrash, onclose, onplay, onexport, onerror, ondiscard, memoryTakes = [], blocked = false }: { organization: Organization; current?: string; trashCount: number; ontrash: () => void; onclose: () => void; onplay: (take: RecordedTake) => Promise<void>; onexport: (take: RecordedTake) => void; onerror: (message: string) => void; ondiscard: (id: string) => void; memoryTakes?: RecordedTake[]; blocked?: boolean } = $props();
   let takes = $state<TakeSummary[]>([]);
   let busy = $state('');
   let failure = $state('');
   let revision = 0;
   let armedDelete = $state('');
-  let organization = $state<Organization>(projectOrganization());
-  let selectedFolder = $state('all');
   let search = $state('');
   const visibleTakes = $derived([...memoryTakes.filter(take => !takes.some(stored => stored.id === take.id)).map(take => ({ id: take.id, createdAt: take.createdAt, title: take.title, duration: take.duration, scoreId: take.scoreId, synced: false, pending: false })), ...takes].sort((a,b) => b.createdAt - a.createdAt));
-  const filteredTakes = $derived(visibleTakes.filter(take => matchesSearch(search,take.title) && organization.matches('take',take.id,selectedFolder)));
+  const filteredTakes = $derived(visibleTakes.filter(take => matchesSearch(search,take.title) && organization.matches('take',take.id,current === 'trash' ? 'all' : current)));
   const duration = (value: number) => `${Math.floor(value / 60)}:${String(Math.floor(value % 60)).padStart(2, '0')}`;
   async function refresh() {
     const request = ++revision, scope = storageScope();
-    try { const [next,folders] = await Promise.all([listTakes(scope),readOrganization(scope)]); if (request === revision && scope === storageScope()) { takes = next; organization = folders; } }
+    try { const next = await listTakes(scope); if (request === revision && scope === storageScope()) takes = next; }
     catch { failure = 'Impossible de lire les enregistrements de cet appareil.'; }
   }
   async function action(id: string, kind: 'play' | 'export' | 'delete') {
@@ -42,7 +38,7 @@
     } catch (cause) { failure = cause instanceof Error ? cause.message : 'Impossible d’ouvrir cet essai.'; onerror(translate(failure)); }
     finally { busy = ''; }
   }
-  onMount(() => { void refresh(); const stop = subscribeStorage(event => { if (event.reason === 'scope') { takes = []; organization = projectOrganization(); selectedFolder = 'all'; search = ''; armedDelete = ''; failure = ''; } void refresh(); }); return () => { revision++; stop(); }; });
+  onMount(() => { void refresh(); const stop = subscribeStorage(event => { if (event.reason === 'scope') { takes = []; search = ''; armedDelete = ''; failure = ''; } void refresh(); }); return () => { revision++; stop(); }; });
 </script>
 
 <button class="drawer-backdrop" aria-label={$t("Fermer les enregistrements")} onclick={onclose}></button>
@@ -56,14 +52,19 @@
   {/each}
   {#if failure}<p class="failure" role="alert">{$t(failure)}</p>{/if}
   <input class="take-search" type="search" aria-label={$t("Rechercher un essai")} placeholder={$t("Rechercher un essai")} bind:value={search} />
-  <FolderControls {organization} bind:selected={selectedFolder} onrefresh={refresh} {onerror} {blocked} />
+  <label for="take-folder">{$t('Filtrer par dossier')}</label>
+  <select id="take-folder" aria-label={$t('Filtrer par dossier')} value={current === 'trash' ? 'all' : current} onchange={event => current = event.currentTarget.value}>
+    <option value="all">{$t('Tous les dossiers')}</option><option value="unfiled">{$t('Non classés')}</option>
+    {#each organization.destinations() as folder (folder.id)}<option value={folder.id}>{organization.path(folder.id)}</option>{/each}
+  </select>
+  <button class="trash-link" onclick={ontrash}><Trash2 size={17}/>{$t('Corbeille')} · {$t('{count} éléments', { count: trashCount })}</button>
   {#if !visibleTakes.length}<p class="empty">{$t("Aucun essai enregistré. Utilisez « Enregistrer » pour commencer.")}</p>{/if}
   {#if visibleTakes.length && !filteredTakes.length}<p class="empty">{$t("Aucun essai dans cette sélection.")}</p>{/if}
   <div class="take-list">{#each filteredTakes as take (take.id)}
     <article class="take-card">
       <h3>{take.title}</h3>
       <p><time datetime={new Date(take.createdAt).toISOString()}>{formatDate(take.createdAt, $locale)}</time><span>{duration(take.duration)}</span></p>
-      <ItemFolder {organization} kind="take" id={take.id} title={take.title} {onerror} blocked={blocked || memoryTakes.some(item => item.id === take.id)} />
+      <MoveItem {organization} target={{ kind: 'take', id: take.id }} title={take.title} {onerror} blocked={blocked || memoryTakes.some(item => item.id === take.id)} />
       {#if memoryTakes.some(item => item.id === take.id)}<p class="failure">{$t("En mémoire seulement : exportez cet essai avant de fermer la page.")}</p>{/if}
       <div class="take-controls"><button class="review-play" disabled={!!busy || blocked} onclick={() => void action(take.id, 'play')}>{#if busy === take.id}<LoaderCircle class="spin" size={16} />{:else}<Play size={16} />{/if}{$t('Réécouter')}</button><span class="take-sync" title={take.synced ? $t('Synchronisé avec votre compte') : take.pending ? $t('En attente de synchronisation') : $t('Sur cet appareil')}>{#if take.synced}<Cloud size={15} />{:else}<HardDrive size={15} />{/if}</span><button class="icon-button" disabled={!!busy || blocked} aria-label={$t("Exporter cet essai")} onclick={() => void action(take.id, 'export')}><Download size={17} /></button><button class="delete-button" class:armed={armedDelete === take.id} disabled={!!busy || blocked} aria-label={armedDelete === take.id ? $t('Confirmer la suppression') : $t('Supprimer cet essai')} onclick={() => void action(take.id, 'delete')}><Trash2 size={17} />{#if armedDelete === take.id}<span>{$t("Confirmer")}</span>{/if}</button></div>
     </article>
@@ -72,10 +73,12 @@
 
 <style>
   .take-panel { position:fixed; inset:0 0 0 auto; z-index:50; width:min(410px,100vw); overflow:auto; background:var(--side); border-left:1px solid var(--line); padding:18px 22px; box-shadow:0 12px 50px #14213b30; }
+  label { display:block;margin:12px 0 6px;font-size:12px; } select { width:100%;min-height:44px; } .trash-link { min-height:44px;display:flex;gap:8px;align-items:center; }
+  .take-panel .icon-button { min-width:44px;min-height:44px; }
   .take-search { width:100%;border:1px solid var(--line);border-radius:7px;background:var(--paper);color:var(--ink);padding:10px;font-size:13px; }
   .panel-heading { display:flex; align-items:center; gap:10px; } h2 { font-size:18px; font-weight:650; flex:1; }
   .explanation,.sync-note,.empty { font-size:13px; line-height:1.6; color:var(--subtle); margin:15px 0; } .sync-note { display:flex; gap:8px; align-items:flex-start; } .sync-note :global(svg) { flex-shrink:0; margin-top:3px; }
   .take-list { display:flex; flex-direction:column; gap:13px; margin-top:22px; } .take-card { border:1px solid var(--line); border-radius:9px; background:var(--paper); padding:15px; } h3 { font-size:14px; font-weight:600; margin:0 0 9px; overflow-wrap:anywhere; }
-  .take-card p { display:flex; justify-content:space-between; gap:8px; color:var(--subtle); font-size:12px; } .take-controls { display:flex; align-items:center; gap:4px; margin-top:13px; } .review-play { min-height:38px; display:flex; align-items:center; gap:7px; padding:7px 10px; border-radius:6px; color:var(--accent); background:var(--accent-soft); font-size:13px; }
-  .take-sync { margin-left:auto; color:var(--subtle); display:flex; align-items:center; } .delete-button { display:flex; align-items:center; justify-content:center; min-height:38px; min-width:32px; gap:5px; border-radius:6px; font-size:12px; } .armed,.failure { color:var(--coral); } .failure { font-size:13px; line-height:1.5; }
+  .take-card p { display:flex; justify-content:space-between; gap:8px; color:var(--subtle); font-size:12px; } .take-controls { display:flex; align-items:center; gap:4px; margin-top:13px; } .review-play { min-height:44px; display:flex; align-items:center; gap:7px; padding:7px 10px; border-radius:6px; color:var(--accent); background:var(--accent-soft); font-size:13px; }
+  .take-sync { margin-left:auto; color:var(--subtle); display:flex; align-items:center; } .delete-button { display:flex; align-items:center; justify-content:center; min-height:44px; min-width:44px; gap:5px; border-radius:6px; font-size:12px; } .armed,.failure { color:var(--coral); } .failure { font-size:13px; line-height:1.5; }
 </style>

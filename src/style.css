@@ -200,13 +200,14 @@ input[type=range]:disabled { cursor: default; }
 /* Drawers leave the score's engraving and playback untouched. */
 .drawer-backdrop { position: fixed; inset: 0; z-index: 45; background: #10203b55; }
 .library-panel, .mixer-panel { position: fixed; top: 0; bottom: 0; z-index: 50; background: var(--side); overflow-y: auto; display: flex; flex-direction: column; box-shadow: 0 12px 50px #14213b30; }
-.library-panel { left: 0; width: min(300px, 90vw); padding: 18px 16px 0; border-right: 1px solid var(--line); }
+.library-panel { left: 0; width: min(370px, 96vw); padding: 18px 16px 0; border-right: 1px solid var(--line); }
 .section-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 13px; font-weight: 650; }
 .library-panel>.section-heading { padding-left: 9px; }
+.library-panel>.section-heading button { width:44px;height:44px; }
 .library-tabs { display:flex;gap:4px;margin:18px 0 12px;border-bottom:1px solid var(--line); }
-.library-tabs button { flex:1;font-size:12px;min-height:38px;padding:8px 5px;color:var(--subtle);border-bottom:2px solid transparent; }
+.library-tabs button { flex:1;font-size:12px;min-height:44px;padding:8px 5px;color:var(--subtle);border-bottom:2px solid transparent; }
 .library-tabs button.active { color:var(--accent);border-color:var(--accent);font-weight:600; }
-.library-search { width:100%;min-height:38px;border:1px solid var(--line);border-radius:7px;padding:9px;background:var(--paper);color:var(--ink);font-size:13px; }
+.library-search { width:100%;min-height:44px;border:1px solid var(--line);border-radius:7px;padding:9px;background:var(--paper);color:var(--ink);font-size:13px; }
 .catalog-folder-label { font-size:12px;font-weight:550;margin:20px 0 7px; }
 .catalog-description,.library-empty { font-size:12px;line-height:1.6;color:var(--subtle);padding:12px 4px; }
 .public-catalog-link { display:flex;gap:7px;align-items:center;color:var(--accent);font-size:12px;margin:0 4px 18px; }
@@ -214,7 +215,7 @@ input[type=range]:disabled { cursor: default; }
 .catalog-piece-actions { display:flex;align-items:center;justify-content:space-between;gap:5px;padding:0 10px;font-size:10px;color:var(--subtle); }
 .catalog-piece-actions button { display:flex;align-items:center;gap:4px;font-size:11px;min-height:32px;color:var(--accent);padding:5px 0; }
 .catalog-credits { font-size:11px;line-height:1.6;padding:0 10px;color:var(--subtle); } .catalog-credits summary { cursor:pointer; } .catalog-credits p { margin-top:6px; } .catalog-credits a { text-decoration:underline;text-underline-offset:2px; }
-.saved-piece { padding-bottom:6px;border-bottom:1px solid var(--line); } .saved-piece-folder { padding:0 12px 3px 38px; }
+.saved-piece { padding-bottom:6px;border-bottom:1px solid var(--line); }
 .import-button { display: flex; align-items: center; gap: 9px; font-size: 13px; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper); margin: 18px 0 24px; }
 .import-button>span { margin-left: auto; font-size: 10px; color: var(--subtle); border: 1px solid var(--line); padding: 2px; border-radius: 3px; }
 .library-label { display: flex; justify-content: space-between; font-size: 11px; font-weight: 600; color: var(--subtle); margin: 0 10px 10px; }
