@@ -1,5 +1,5 @@
 import { PITCH_CONFIG } from './pitch-config';
-import { readPreference, writePreference, writePreferenceIfMissing } from './preferences';
+import { readPreference, writePreference, writePreferenceIfMissing, subscribePreference } from './preferences';
 
 type ExerciseStep = readonly [degree: number, beats: number, syllable: string];
 type ExerciseDefinition = {
@@ -194,4 +194,8 @@ export function adoptAnonymousExercisePreferences(scope: string): void {
   if (!scope.startsWith('user:') || scope.length === 5) return;
   const anonymous = decodePreferences(readPreference(preferenceKey('anonymous')));
   if (anonymous) writePreferenceIfMissing(preferenceKey(scope), JSON.stringify(anonymous));
+}
+
+export function subscribeExercisePreferences(scope: string, listener: () => void): () => void {
+  return subscribePreference(preferenceKey(scope), listener);
 }

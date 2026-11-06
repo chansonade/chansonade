@@ -1,6 +1,6 @@
 // Same isolated Vite/CDP runner as the other client checks; no application data.
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdir } from 'node:fs/promises';
 import ts from 'typescript';
 import { BasicMIDI, SpessaLog } from 'spessasynth_core';
 import { chromium } from 'playwright';
@@ -108,6 +108,7 @@ console.log(`PASS exercises: seven motifs, six editable extents, complete range 
 
 const browser = await chromium.connectOverCDP(process.env.CHANSONADE_TEST_CDP);
 const context = await browser.newContext({ serviceWorkers: 'block' });
+const contexts = [context];
 const errors = [];
 context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
 try {
@@ -155,6 +156,15 @@ try {
       for (const key of errorKeys) check(translate(key) !== key, `${language}: missing exercise error`);
     }
     check(localStorage.getItem('chansonade.practice.synthetic') === 'untouched', 'Exercise settings do not touch score practice');
+    let notifications = 0;
+    const unsubscribe = (await import('/src/lib/exercises.ts')).subscribeExercisePreferences(a, () => notifications++);
+    write(a, own); check(notifications === 1, 'Successful local writes notify the active scope');
+    write(b, guest); check(notifications === 1, 'Other scopes do not notify this view');
+    window.dispatchEvent(new StorageEvent('storage', { key: key(a) }));
+    check(notifications === 2, 'Native storage events notify the same preference subscription');
+    unsubscribe(); write(a, own);
+    check(notifications === 2, 'Unmounted subscriptions release both listeners');
+
     const ownStorage = Object.getOwnPropertyDescriptor(window, 'localStorage');
     Object.defineProperty(window, 'localStorage', { configurable: true, get() { throw new DOMException('Synthetic denied getter', 'SecurityError'); } });
     check(read(a).bpm === 80 && read(a).voice === null, 'Denied getter gives defaults');
@@ -166,4 +176,271 @@ try {
   assert.equal(await page.evaluate(async () => (await import('/src/lib/exercises.ts')).readExercisePreferences('user:exercise-a').bpm), 120, 'Preferences survive a real page reload');
   assert.deepEqual(errors, []);
   console.log('PASS exercise preferences: scoped persistence/reload, explicit anonymous adoption, malformed values, denied getter/read/write, existing-entry protection and translated metadata');
-} finally { await context.close(); await browser.close(); }
+
+  const fixtureXML = `<score-partwise version="4.0"><work><work-title>Synthetic exercise studio</work-title></work>
+    <part-list><score-part id="P1"><part-name>Synthetic voice</part-name>
+      <midi-instrument id="I1"><midi-channel>1</midi-channel><midi-program>1</midi-program></midi-instrument>
+    </score-part></part-list><part id="P1">${Array.from({ length: 12 }, (_, i) => `<measure number="${i + 1}">
+      ${i ? '' : '<attributes><divisions>1</divisions><time><beats>2</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes><direction><sound tempo="80"/></direction>'}
+      <note><pitch><step>${['C','D','E','G'][i % 4]}</step><octave>4</octave></pitch><duration>2</duration><type>half</type></note>
+    </measure>`).join('')}</part></score-partwise>`;
+  const accountA = { id: 'exercise-ui-a', email: 'exercise-a@example.invalid' };
+  const accountB = { id: 'exercise-ui-b', email: 'exercise-b@example.invalid' };
+  const url = process.env.CHANSONADE_TEST_URL;
+  const ui = await browser.newContext({ locale: 'fr-BE', viewport: { width: 1280, height: 900 }, hasTouch: true, serviceWorkers: 'block' });
+  contexts.push(ui);
+  ui.on('page', page => page.on('pageerror', error => errors.push(error.message)));
+  await ui.addInitScript(() => {
+    if (location.origin === 'null') return;
+    localStorage.setItem('chansonade.language', 'fr');
+    navigator.mediaDevices.enumerateDevices = async () => [];
+    navigator.mediaDevices.getUserMedia = async () => {
+      const audio = new AudioContext(), destination = audio.createMediaStreamDestination(), oscillator = audio.createOscillator();
+      await audio.resume(); oscillator.frequency.value = 220; oscillator.connect(destination); oscillator.start();
+      const track = destination.stream.getAudioTracks()[0], stop = track.stop.bind(track);
+      track.stop = () => { stop(); oscillator.stop(); void audio.close(); };
+      return destination.stream;
+    };
+  });
+  let sessionUser = null;
+  await ui.route('**/api/v1/**', async route => {
+    const request = route.request(), path = new URL(request.url()).pathname.split('/api/v1/')[1];
+    if (path === 'session') {
+      if (request.method() === 'POST') sessionUser = request.postDataJSON().email === accountB.email ? accountB : accountA;
+      if (request.method() === 'DELETE') sessionUser = null;
+      return route.fulfill({ json: { user: sessionUser, registration: 'open' } });
+    }
+    // Keep all data local: no external API or production credentials.
+    return route.fulfill({ status: 503, json: { message: 'Synthetic unavailable service' } });
+  });
+  await ui.route('**/scores/*.musicxml', route => route.fulfill({ contentType: 'application/xml', body: fixtureXML }));
+  const fixturePath = '/exercise-view-fixture';
+  await ui.route(url + fixturePath, route => route.fulfill({ contentType: 'text/html', body: `<!doctype html><div id="app"></div>
+    <script type="module">
+      import { AudioPlayer } from '/src/lib/audio.ts';
+      import { scoreId, writeSettings, readSettings } from '/src/lib/storage.ts';
+      const id = await scoreId(${JSON.stringify(fixtureXML)});
+      if (!await readSettings(id, 'anonymous')) await writeSettings(id, {
+        rate: .8, loopEnabled: true, loopA: 1.5, loopB: 9, target: 0,
+        parts: [{channel: 0, program: 73, volume: 35, transpose: 2, muted: false, solo: true}]
+      }, 'anonymous');
+      window.__exerciseStarts = [];
+      const load = AudioPlayer.prototype.load, start = AudioPlayer.prototype.startExercise;
+      AudioPlayer.prototype.load = function (...args) { window.__exerciseAudio = this; return load.apply(this, args); };
+      AudioPlayer.prototype.startExercise = function (passage) {
+        window.__exerciseStarts.push({ mode: passage.mode, tonic: passage.tonic, bpm: passage.bpm });
+        return start.call(this, passage);
+      };
+      await import('/src/main.ts');
+    </script>` }));
+  const exercisePage = await ui.newPage();
+  await exercisePage.goto(url + fixturePath);
+  const studioReady = () => exercisePage.waitForFunction(() => document.querySelector('.transport .play-button')?.disabled === false);
+  await studioReady();
+  const chooseExercises = () => exercisePage.getByRole('button', { name: 'Exercices', exact: true }).click();
+  const panel = exercisePage.locator('.exercise-view');
+  const studioSnapshot = () => exercisePage.evaluate(async () => {
+    const a = window.__exerciseAudio;
+    return { time: a.time, playing: a.playing, rate: a.sequencer.playbackRate,
+      channels: a.synth.midiChannels.map(c => ({ ...c.systemParameters, patch: { ...c.patch } })), loop: a.loop };
+  });
+  // The snapshot is taken directly from the engine; avoid depending on the engraving IDs.
+  const geometryBefore = await exercisePage.locator('.score-viewport').evaluate(node => ({ width: node.clientWidth, height: node.clientHeight }));
+  await exercisePage.getByRole('button', { name: 'Lire', exact: true }).click();
+  await chooseExercises();
+  assert.equal(await exercisePage.evaluate(() => window.__exerciseAudio.playing), true, 'Entering Exercises alone must not pause the studio');
+  await panel.getByText('Choisissez une tessiture pour commencer, puis adaptez les notes basse et haute à votre voix.', { exact: true }).waitFor();
+  assert(await panel.getByRole('button', { name: 'Écouter', exact: true }).isDisabled());
+  await panel.getByLabel('Tessiture indicative').selectOption('3');
+  await panel.getByLabel('Motif', { exact: true }).selectOption('hum');
+  await panel.getByLabel('Tempo des exercices (BPM)').fill('160');
+  await panel.getByLabel('Tempo des exercices (BPM)').press('Tab');
+  await panel.getByRole('button', { name: 'Écouter', exact: true }).click();
+  await exercisePage.waitForFunction(() => window.__exerciseAudio.exerciseState.phase === 'playing');
+  const pausedStudio = await studioSnapshot();
+  assert.equal(pausedStudio.playing, false);
+  assert.equal(pausedStudio.rate, .8);
+  assert.deepEqual(pausedStudio.loop, { start: 1.5, end: 9 });
+  assert.equal(pausedStudio.channels[0].keyShift, 2);
+  assert.equal(pausedStudio.channels[0].gain, .35);
+  assert.deepEqual(await exercisePage.locator('.score-viewport').evaluate(node => ({ width: node.clientWidth, height: node.clientHeight })), geometryBefore, 'Exercise view must not resize the hidden studio');
+  await exercisePage.waitForFunction(() => window.__exerciseAudio.exerciseState.phase === 'ended');
+  await panel.getByRole('button', { name: 'Seul', exact: true }).click();
+  await exercisePage.waitForFunction(() => window.__exerciseAudio.exerciseState.phase === 'playing');
+  await panel.getByRole('button', { name: 'Tonalité suivante', exact: true }).click();
+  await exercisePage.waitForFunction(() => window.__exerciseAudio.exerciseState.phase === 'playing');
+  assert.deepEqual(await exercisePage.evaluate(() => window.__exerciseStarts.at(-1)), { mode: 'solo', tonic: 49, bpm: 160 });
+  await panel.getByLabel('Pas chromatique').selectOption('2');
+  await panel.getByRole('button', { name: 'Tonalité suivante', exact: true }).click();
+  await exercisePage.waitForFunction(() => window.__exerciseAudio.exerciseState.phase === 'playing');
+  assert.equal(await panel.locator('[data-exercise-tonic]').getAttribute('data-exercise-tonic'), '51');
+  await panel.getByRole('button', { name: 'Tonalité précédente', exact: true }).click();
+  await exercisePage.waitForFunction(() => window.__exerciseAudio.exerciseState.phase === 'playing');
+  assert.equal(await panel.locator('[data-exercise-tonic]').getAttribute('data-exercise-tonic'), '49');
+  await panel.getByRole('button', { name: 'Stop', exact: true }).click();
+  await panel.focus(); await exercisePage.keyboard.press('Space');
+  await exercisePage.waitForFunction(() => window.__exerciseAudio.exerciseState.phase === 'playing');
+  await exercisePage.keyboard.press('ArrowRight');
+  await exercisePage.waitForFunction(() => window.__exerciseAudio.exerciseState.phase === 'playing');
+  assert.equal(await exercisePage.evaluate(() => window.__exerciseStarts.at(-1).mode), 'solo');
+  await exercisePage.keyboard.press('Escape');
+  assert.equal(await exercisePage.evaluate(() => window.__exerciseAudio.exerciseState.phase), 'idle');
+  const startsBeforeFieldKey = await exercisePage.evaluate(() => window.__exerciseStarts.length);
+  await panel.getByLabel('Tempo des exercices (BPM)').focus();
+  await exercisePage.keyboard.press('ArrowRight');
+  assert.equal(await exercisePage.evaluate(() => window.__exerciseStarts.length), startsBeforeFieldKey, 'Exercise shortcuts ignore editable fields');
+  await panel.getByLabel('Note haute').selectOption('64');
+  await panel.getByLabel('Note basse').selectOption('60');
+  await panel.getByLabel('Motif', { exact: true }).selectOption('octave');
+  assert(await panel.getByRole('button', { name: 'Écouter', exact: true }).isDisabled());
+  await panel.getByText('Ce motif ne tient pas dans votre étendue. Élargissez les bornes ou choisissez un autre motif.', { exact: true }).waitFor();
+  await panel.getByLabel('Motif', { exact: true }).selectOption('hum');
+  assert(await panel.getByRole('button', { name: 'Tonalité précédente', exact: true }).isDisabled());
+  assert(await panel.getByRole('button', { name: 'Tonalité suivante', exact: true }).isDisabled());
+  await panel.getByLabel('Note haute').selectOption('72');
+  await panel.getByLabel('Tonique de départ').selectOption('68');
+  assert(await panel.getByRole('button', { name: 'Tonalité suivante', exact: true }).isDisabled());
+  await panel.getByRole('button', { name: 'Tonalité précédente', exact: true }).click();
+  await exercisePage.waitForFunction(() => window.__exerciseAudio.exerciseState.phase === 'playing');
+  assert.equal(await exercisePage.evaluate(() => window.__exerciseStarts.at(-1).tonic), 66);
+  await panel.getByRole('button', { name: 'Stop', exact: true }).click();
+  await exercisePage.getByRole('button', { name: 'Partition', exact: true }).click();
+  assert.deepEqual(await studioSnapshot(), pausedStudio, 'Full manual loop preserves score position/rate/mix/loop without resuming');
+  await exercisePage.getByRole('button', { name: 'Piano', exact: true }).click();
+  await exercisePage.locator('.piano-keyboard:not(.compact)').focus();
+  await exercisePage.keyboard.down('KeyQ');
+  assert.equal(await exercisePage.evaluate(() => window.__exerciseAudio.exerciseState.phase), 'idle', 'Piano keyboard does not start exercises');
+  await exercisePage.keyboard.up('KeyQ');
+  await exercisePage.getByRole('button', { name: 'Partition', exact: true }).click();
+
+  // A real synthetic take protects entry; its WAV replay stays mounted and paused.
+  await exercisePage.getByRole('button', { name: 'Enregistrer un essai', exact: true }).click();
+  await exercisePage.locator('.take-button.recording').waitFor();
+  assert(await exercisePage.getByRole('button', { name: 'Exercices', exact: true }).isDisabled());
+  await exercisePage.waitForTimeout(1200);
+  await exercisePage.getByRole('button', { name: 'Arrêter l’essai', exact: true }).click();
+  await exercisePage.waitForFunction(() => document.querySelector('.take-button') && !document.querySelector('.take-button').disabled && !document.querySelector('.take-button.recording'));
+  await exercisePage.getByRole('button', { name: 'Enregistrements', exact: true }).click();
+  await exercisePage.locator('.take-card').getByRole('button', { name: 'Réécouter', exact: true }).click();
+  await exercisePage.waitForFunction(() => document.querySelector('.transport audio')?.currentTime > .05);
+  await chooseExercises();
+  await exercisePage.evaluate(() => { window.__replayElement = document.querySelector('.transport audio'); });
+  await panel.getByRole('button', { name: 'Écouter', exact: true }).click();
+  await exercisePage.waitForFunction(() => window.__exerciseAudio.exerciseState.phase === 'playing');
+  const pausedReplay = await exercisePage.evaluate(() => window.__replayElement.currentTime);
+  await exercisePage.waitForTimeout(100);
+  assert(await exercisePage.evaluate(() => window.__replayElement === document.querySelector('.transport audio') && window.__replayElement.paused), 'Replay stays mounted and paused');
+  assert.equal(await exercisePage.evaluate(() => window.__replayElement.currentTime), pausedReplay);
+  await exercisePage.getByRole('button', { name: 'Partition', exact: true }).click();
+  assert(await exercisePage.evaluate(() => window.__replayElement.paused), 'Returning to studio does not resume WAV');
+  await exercisePage.getByRole('button', { name: 'Quitter la réécoute', exact: true }).click();
+  await chooseExercises();
+
+  const anonymousPreferences = await exercisePage.evaluate(async () => (await import('/src/lib/exercises.ts')).readExercisePreferences('anonymous'));
+  await exercisePage.evaluate(async a => (await import('/src/lib/sync.ts')).login(a.email, 'synthetic'), accountA);
+  await exercisePage.waitForFunction(() => !document.querySelector('.exercise-view select')?.disabled);
+  assert.deepEqual(await exercisePage.evaluate(async () => (await import('/src/lib/exercises.ts')).readExercisePreferences('user:exercise-ui-a')), anonymousPreferences, 'Confirmed connection adopts anonymous preferences');
+  await panel.getByLabel('Tempo des exercices (BPM)').fill('111'); await panel.getByLabel('Tempo des exercices (BPM)').press('Tab');
+  await panel.getByRole('button', { name: 'Écouter', exact: true }).click();
+  await exercisePage.waitForFunction(() => window.__exerciseAudio.exerciseState.phase === 'playing');
+  await exercisePage.evaluate(async a => (await import('/src/lib/sync.ts')).login(a.email, 'synthetic'), accountB);
+  assert.equal(await exercisePage.evaluate(() => window.__exerciseAudio.exerciseState.phase), 'idle', 'Changing account cancels exercise');
+  assert.equal(await panel.getByLabel('Tempo des exercices (BPM)').inputValue(), String(anonymousPreferences.bpm), 'B adopts anonymous, not A');
+  await exercisePage.evaluate(async a => (await import('/src/lib/sync.ts')).login(a.email, 'synthetic'), accountA);
+  assert.equal(await panel.getByLabel('Tempo des exercices (BPM)').inputValue(), '111', 'A retains its own settings');
+  await exercisePage.reload(); await studioReady(); await chooseExercises();
+  assert.equal(await panel.getByLabel('Tempo des exercices (BPM)').inputValue(), '111', 'Scoped UI settings survive reload');
+
+  // Layout and translations do not restart audio. Capture only synthetic content.
+  await panel.getByLabel('Motif', { exact: true }).selectOption('five-note');
+  await panel.getByLabel('Tonique de départ').selectOption('60');
+  for (const [language, name] of [['en','Exercises'], ['de','Übungen'], ['nl','Oefeningen'], ['fr','Exercices']]) {
+    await exercisePage.evaluate(async language => (await import('/src/lib/i18n.ts')).setLanguage(language), language);
+    assert.equal(await exercisePage.getByRole('button', { name, exact: true }).getAttribute('aria-pressed'), 'true');
+  }
+  const screenshotDir = process.env.CHANSONADE_TEST_SCREENSHOTS;
+  if (screenshotDir) await mkdir(screenshotDir, { recursive: true });
+  for (const [width, height, theme] of [[390,844,'dark'], [844,390,'light'], [1280,900,'light']]) {
+    await exercisePage.setViewportSize({ width, height });
+    await exercisePage.evaluate(async theme => (await import('/src/lib/theme.ts')).themePreference.set(theme), theme);
+    await exercisePage.waitForTimeout(180);
+    const rect = await panel.boundingBox();
+    assert(rect.x >= 0 && rect.y >= 0 && rect.x + rect.width <= width + 1 && rect.y + rect.height <= height + 1, 'Exercise panel fits viewport');
+    for (const button of await panel.locator('button').all()) {
+      const box = await button.boundingBox(); assert(box.width >= 44 && box.height >= 44, 'Exercise touch targets are at least 44px');
+    }
+    const before = await panel.boundingBox();
+    const listen = panel.getByRole('button', { name: 'Écouter', exact: true });
+    if (width === 390) await listen.tap(); else await listen.click();
+    await exercisePage.waitForFunction(() => window.__exerciseAudio.exerciseState.phase === 'playing');
+    assert.deepEqual(await panel.boundingBox(), before, 'Playback does not resize landscape rows');
+    const origin = await exercisePage.evaluate(() => window.__exerciseAudio.exerciseState.startedAt);
+    if (width === 390) {
+      await exercisePage.setViewportSize({ width: 844, height: 390 });
+      await exercisePage.waitForTimeout(180);
+      assert.equal(await exercisePage.evaluate(() => window.__exerciseAudio.exerciseState.startedAt), origin, 'Rotation preserves the exercise clock');
+      await exercisePage.setViewportSize({ width, height });
+      await exercisePage.waitForTimeout(180);
+    }
+    if (width === 1280) {
+      await exercisePage.evaluate(async () => {
+        (await import('/src/lib/i18n.ts')).setLanguage('en');
+        (await import('/src/lib/theme.ts')).themePreference.set('dark');
+      });
+      assert.equal(await exercisePage.evaluate(() => window.__exerciseAudio.exerciseState.startedAt), origin, 'Language and theme do not restart exercise audio');
+      await exercisePage.evaluate(async () => {
+        (await import('/src/lib/i18n.ts')).setLanguage('fr');
+        (await import('/src/lib/theme.ts')).themePreference.set('light');
+      });
+    }
+
+    await panel.getByRole('button', { name: 'Stop', exact: true }).click();
+    if (width === 390) await panel.locator('.exercise-scroll').evaluate(node => { node.scrollTop = node.scrollHeight; });
+    if (screenshotDir && width !== 844) await exercisePage.screenshot({ path: `${screenshotDir}/exercises-${width === 390 ? 'phone-portrait' : 'desktop'}.png` });
+  }
+  assert.deepEqual(errors, [], 'No unhandled exercise UI errors');
+  console.log('PASS exercise UI: first use, editable extents/bounds, manual listen/solo/steps, keyboard, independent studio/replay, recording protection, confirmed adoption/accounts/reload, translations/themes and portrait/landscape');
+
+  // Cached identity is not a confirmed connection. Adoption updates an already open view.
+  const cached = await browser.newContext({ serviceWorkers: 'block' }); contexts.push(cached);
+  cached.on('page', page => page.on('pageerror', error => errors.push(error.message)));
+  const guest = { exerciseId: 'arpeggio', bpm: 83, step: 2, voice: { low: 48, high: 72, tonic: 55 } };
+  await cached.addInitScript(({ account, guest }) => {
+    if (location.origin === 'null') return;
+    localStorage.setItem('chansonade.account', JSON.stringify(account));
+    localStorage.setItem('chansonade.language', 'fr');
+    localStorage.setItem('chansonade.exercises.anonymous', JSON.stringify(guest));
+  }, { account: accountA, guest });
+  let confirmSession;
+  const confirmed = new Promise(resolve => { confirmSession = resolve; });
+  await cached.route('**/api/v1/**', async route => {
+    if (new URL(route.request().url()).pathname.endsWith('/session')) { await confirmed; return route.fulfill({ json: { user: accountA, registration: 'open' } }); }
+    return route.fulfill({ status: 503, json: { message: 'Synthetic unavailable' } });
+  });
+  let releaseScore;
+  const scoreReady = new Promise(resolve => { releaseScore = resolve; });
+  await cached.route('**/scores/*.musicxml', async route => { await scoreReady; return route.fulfill({ contentType: 'application/xml', body: fixtureXML }); });
+  const cachedPage = await cached.newPage();
+  await cachedPage.goto(url);
+  await cachedPage.getByRole('button', { name: 'Exercices', exact: true }).click();
+  assert.equal(await cachedPage.locator('.exercise-view').getByLabel('Tessiture indicative').inputValue(), '', 'Cached account alone does not adopt anonymous preferences');
+  confirmSession();
+  await cachedPage.waitForFunction(() => document.querySelector('.exercise-view input[type="number"]')?.value === '83');
+  assert.equal(await cachedPage.locator('.exercise-view').getByLabel('Tessiture indicative').inputValue(), '3', 'Confirmed adoption refreshes an already mounted view');
+  console.log('PASS exercise connection: cached account does not adopt before server confirmation; live adoption refreshes without remount');
+  await cachedPage.evaluate(async () => {
+    const { AudioPlayer } = await import('/src/lib/audio.ts');
+    const start = AudioPlayer.prototype.startExercise;
+    AudioPlayer.prototype.startExercise = function (passage) { window.__earlyExerciseAudio = this; return start.call(this, passage); };
+  });
+  await cachedPage.locator('.exercise-view').getByRole('button', { name: 'Écouter', exact: true }).click();
+  await cachedPage.waitForFunction(() => window.__earlyExerciseAudio?.exerciseState.phase === 'playing');
+  assert.equal(await cachedPage.evaluate(() => window.__earlyExerciseAudio.loaded), false, 'Exercises can start before the initial score loads');
+  releaseScore();
+  await cachedPage.waitForFunction(() => window.__earlyExerciseAudio.loaded);
+  assert.notEqual(await cachedPage.evaluate(() => window.__earlyExerciseAudio.exerciseState.phase), 'idle', 'Late studio loading must not cancel a newer exercise');
+  assert.deepEqual(errors, [], 'No unhandled exercise/adoption/loading errors');
+  console.log('PASS exercise loading: sound before any score, late initial studio loading preserves newer auxiliary activity');
+
+
+} finally { for (const context of contexts) await context.close(); await browser.close(); }

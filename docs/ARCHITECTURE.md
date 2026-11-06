@@ -20,6 +20,7 @@ micro. Le serveur de comptes et de synchronisation est facultatif et indépendan
 | `lib/storage.ts`, `lib/sync.ts`, `lib/take-sync.ts` | Persistance locale, file de mutations et synchronisation automatique par compte. `AccountPanel.svelte` présente la connexion et son état. |
 | `lib/theme.ts`, `lib/ThemeToggle.svelte` | Préférence système/clair/sombre et application de `data-theme` au document. |
 | `lib/catalog.ts`, `public/scores/catalog.json` | Catalogue public éditorialisé, identités de contenu, dossiers par répertoire/langue et provenance par édition. |
+| `lib/ExerciseView.svelte` | Choix et commandes des exercices, préférences du compte, piano-roll attendu et affichage du temps AudioContext. |
 | `lib/exercises.ts` | Motifs déclaratifs, étendues vocales, calendrier et MIDI d’exercice, préférences locales par compte. |
 | `lib/organization.ts` | Projection pure des dossiers imbriqués, chemins, destinations et classement actif/corbeille des partitions et essais. |
 | `lib/LibraryTree.svelte`, `lib/MoveItem.svelte`, `lib/LibraryDialog.svelte` | Arborescence personnelle, corbeille, déplacements et confirmations accessibles. |
@@ -94,19 +95,46 @@ peut pas démarrer après une initialisation ou un acquittement tardif. Les sort
 restent fermées jusqu'à un départ encore valide. Le blur, le passage en
 arrière-plan, le changement de vue ou de compte et le démontage arrêtent cet
 instrument ; la partition et une capture réelle ne sont pas arrêtées par ces
-événements de focus. L'interface Exercices n'est pas encore exposée ; sa future
-commande de départ devra mettre le studio en pause, sans reprise automatique.
+événements de focus.
+
+`workspace: 'score' | 'piano' | 'exercises'` choisit la vue ; la préférence
+Partition/Ruban/Auto reste indépendante. L'arrêt de l'auxiliaire suit le changement
+de workspace, pas une rotation qui conserve l'exercice. Le studio garde ses nœuds
+montés et ses rangées dans la grille : l'overlay Exercices couvre la partition et
+son transport sans redimensionner la gravure ni recréer l'élément audio de réécoute.
+Entrer dans la vue ne change pas le transport. Au premier départ d'exercice,
+`App.svelte` met la partition ou le WAV en pause à sa position courante, sans reprise
+automatique au retour. L'analyse micro du studio, y compris un démarrage en attente,
+est arrêtée avant ce son ; aucune activation micro d'exercice n'est encore proposée.
+Une prise réelle bloque l'entrée et les départs.
+
+`ExerciseView.svelte` possède les réglages et les commandes. Écouter joue le motif ;
+Seul garde l'accord et toute la fenêtre silencieuse. Précédent/suivant changent la
+tonique puis rejouent selon la dernière action ; les bornes du domaine rendent les
+pas impossibles indisponibles. Avec guide sera livré avec le retour micro, pour
+avoir une fonction distincte d'Écouter. Le piano-roll montre déjà les notes chantées
+du même calendrier et un curseur lu sur `exerciseState` ; rAF sert uniquement au
+dessin, jamais aux pulsations. Les commandes occupent un pied de vue de hauteur
+stable ; seul le panneau supérieur défile, y compris en paysage. Espace rejoue,
+les flèches changent la tonalité et Échap arrête, hors champs, dialogues et clavier
+Piano. Langue et thème ne relancent pas le son.
 
 Les fonctions de préférences prennent toujours un scope explicite, sous
 `chansonade.exercises.<scope>`, et utilisent `preferences.ts`. Lecture et écriture
 normalisent les valeurs et tolèrent un stockage indisponible. La reprise anonyme
-est une opération explicite à appeler à la confirmation d'une connexion lors de
-l'intégration de la vue : elle copie uniquement les préférences anonymes vers un
+est appelée par `sync.ts` à la confirmation d'une nouvelle session, avant la
+publication du compte actif : elle copie uniquement les préférences anonymes vers un
 compte sans entrée, jamais depuis un autre compte. Même une entrée de compte
 endommagée est conservée. Si la lecture du compte est refusée, aucune écriture de
 reprise n'est tentée. La copie ne supprime pas les préférences anonymes, afin de
-les conserver quand la persistance est facultative. Il n'y a aucun abonnement ou
-accès au stockage à l'import du module, ni modification de la synchronisation.
+les conserver quand la persistance est facultative. Aucun accès au stockage n'a
+lieu à l'import du module. `preferences.ts` notifie les écritures locales réussies
+et relaie les événements storage sans conserver de copie des valeurs. La vue
+s'abonne seulement à sa clé de compte : une confirmation tardive met aussi à jour
+une vue déjà ouverte sur une identité mise en cache. Les écritures refusées gardent
+les choix utilisables en mémoire ; langue et thème n'affectent pas cet abonnement.
+Le composant est remonté par scope et nettoie abonnement, ResizeObserver et rAF
+à la sortie. Aucune préférence d'exercice n'est synchronisée avec le serveur.
 
 ## De l'entrée micro à la courbe
 

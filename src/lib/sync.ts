@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import { adoptAnonymousExercisePreferences } from './exercises';
 import { readPreference, writePreference, removePreference } from './preferences';
 import { synchronizeTakes, TakeAPIError } from './take-sync';
 import { forgetAccountScope, syncQueue, rearmRejectedMutations, ANONYMOUS_SCOPE, storageScope, setStorageScope, subscribeStorage, pendingMutations, markMutationSent, releaseRejectedMutation, acceptMutation, applyRemoteChanges, syncCursor, syncConflicts, resolveSyncConflict, claimAnonymousLibrary, type LocalResource, type RemoteResource } from './storage';
@@ -58,6 +59,7 @@ async function adoptSession(next: Session) {
   const changed = state.user?.id !== next.user?.id;
   const fresh = !session || session.user?.id !== next.user?.id;
   const user = next.user;
+  if (fresh && user) adoptAnonymousExercisePreferences(`user:${user.id}`);
   if (changed) {
     epoch++;
     controller?.abort();

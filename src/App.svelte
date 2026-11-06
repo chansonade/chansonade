@@ -4,6 +4,7 @@
   import { Score, examples, readMusicXML, metadata, indexGeometry, frameAt, measureAt, type MusicalData, type ScoreGeometry, type ViewMode, type Part, type NotePosition } from './lib/score';
   import { AudioPlayer } from './lib/audio';
   import PianoKeyboard from './lib/PianoKeyboard.svelte';
+  import ExerciseView from './lib/ExerciseView.svelte';
   import AccountPanel from './lib/AccountPanel.svelte';
   import ThemeToggle from './lib/ThemeToggle.svelte';
   import RepositoryLink from './lib/RepositoryLink.svelte';
@@ -82,7 +83,7 @@
   let takesOpen = $state(false);
   let helpOpen = $state(false);
   let keyboardOpen = $state(false);
-  let pianoMode = $state(false);
+  let workspace = $state<'score' | 'piano' | 'exercises'>('score');
   let preference = $state<'auto' | ViewMode>('auto');
   let viewportWidth = $state(900);
   let viewportHeight = $state(500);
@@ -300,7 +301,7 @@
     // including a deferred account switch or the initial library lookup.
     audio.stopAuxiliary();
     const request = { scope: storageScope(), source };
-    if (source.kind !== 'library') libraryOpen = false;
+    if (source.kind !== 'library') { libraryOpen = false; workspace = 'score'; }
     opening = request;
     ++renderRevision;
     clearTimeout(layoutTimer);
@@ -376,7 +377,7 @@
     cancelTakePreparation();
     if (takeCapture) yield* openingWait(finishTake());
     yield* openingWait(savePractice());
-    audio.pause(); audio.stopAuxiliary(); playing = false;
+    audio.pause(); playing = false;
     const { xml, id, info } = document;
     if (source.kind === 'take' && currentXML === xml) return;
     audioReady = false;
@@ -530,7 +531,7 @@
 
   function updateVisual(time: number, dt: number, instant = false) {
     if (!music || !geometry || !content || !viewport || !cursor) return;
-    if (pianoMode) { currentMeasure = measureAt(geometry.measures, time).current?.number || 1; return; }
+    if (workspace !== 'score') { currentMeasure = measureAt(geometry.measures, time).current?.number || 1; return; }
     const frame = frameAt(music.frames, time);
     const active = new Set((frame?.notes || []).map((id) => music!.notes[id]?.writtenId || id));
     for (const id of highlighted) if (!active.has(id)) elementIndex.get(id)?.classList.remove('playing-note');
@@ -623,12 +624,24 @@
     if (value) updateVisual(position, 0.016, !playing);
   }
   $effect(() => {
-    // Read the effective view, including automatic portrait/landscape changes.
-    void (pianoMode ? 'piano' : mode);
+    if (workspace !== 'score') keyboardOpen = false;
     untrack(() => audio.stopAuxiliary());
   });
-  function chooseMode(value: 'auto' | ViewMode) { pianoMode = false; preference = value; showControls(); }
-  function choosePiano() { pianoMode = true; keyboardOpen = false; showControls(); }
+  function chooseMode(value: 'auto' | ViewMode) { workspace = 'score'; preference = value; showControls(); }
+  function chooseWorkspace(value: typeof workspace) {
+    if (value === 'exercises' && takePhase !== 'idle') return;
+    if (value === 'exercises') { libraryOpen = false; mixerOpen = false; takesOpen = false; }
+    workspace = value; showControls();
+  }
+  function prepareExercise() {
+    if (workspace !== 'exercises' || takePhase !== 'idle') return false;
+    if (replayTake) replayAudio?.pause();
+    else audio.pause();
+    playing = false;
+    observeTransport();
+    if (micActive || micBusy) { pitch.stop(); micActive = false; pitchResult = null; }
+    return true;
+  }
   function playPiano(midi: number) { void audio.pianoNoteOn(midi).catch((cause) => notify(cause instanceof Error ? cause.message : 'Le piano est indisponible.')); }
   function applyMix(save = true) {
     const anySolo = parts.some((p) => p.solo);
@@ -657,7 +670,7 @@
   function startLoopSelection() {
     stopReplay();
     if (loopSelecting) { loopSelecting = null; return; }
-    pianoMode = false;
+    workspace = 'score';
     loopSelecting = 'a';
     showControls();
     notify('Cliquez la première note du passage, puis la dernière.');
@@ -730,6 +743,7 @@
     micBusy = true;
     try {
       await pitch.start(audio.context || undefined, microphoneId);
+      if (!pitch.active) return;
       traceSince = 0; // A newly opened microphone can have a new AudioContext clock.
       micActive = true;
       await refreshMicrophones();
@@ -964,13 +978,15 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   function onKey(event: KeyboardEvent) {
-    if ((event.target as HTMLElement)?.closest('input, select, textarea, button') || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.defaultPrevented) return;
+    if ((event.target as HTMLElement)?.closest('input, select, textarea, button, [contenteditable="true"]') || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key === 'Escape') { loopSelecting = null; helpOpen = false; mixerOpen = false; takesOpen = false; accountOpen = false; return; }
+    if (event.key.toLowerCase() === 'f') { void toggleFullscreen(); return; }
+    if (workspace === 'exercises') return;
     if (event.code === 'Space') { event.preventDefault(); void togglePlayback(); }
     else if (event.key === 'ArrowRight') { event.preventDefault(); navigateNote(1); }
     else if (event.key === 'ArrowLeft') { event.preventDefault(); navigateNote(-1); }
-    else if (event.key.toLowerCase() === 'f') void toggleFullscreen();
     else if (event.key.toLowerCase() === 'l') startLoopSelection();
-    else if (event.key === 'Escape') { loopSelecting = null; helpOpen = false; mixerOpen = false; takesOpen = false; accountOpen = false; }
   }
 
   async function reloadLibrary(scope = storageScope()) {
@@ -988,7 +1004,7 @@
   function clearAccountDocument(scope: string) {
     // Clear the previous account before any storage, network or engraving wait.
     stopReplay(); showTake(null);
-    audio.pause(); audio.stopAuxiliary(); playing = false; audioReady = false;
+    audio.pause(); playing = false; audioReady = false;
     position = 0; duration = 0; rate = 1; targetChannel = 0; loopA = null; loopB = null; loopEnabled = false; selection = null;
     music = null; pages = []; geometry = null; currentXML = ''; currentId = '';
     title = 'Ouvrir une partition'; composer = ''; subtitle = '';
@@ -1090,9 +1106,10 @@
 
 <div
   class="app"
-  class:piano-practice={pianoMode}
+  class:piano-practice={workspace === 'piano'}
   class:immersive={mobileLandscape || fullscreen}
-  class:quiet={!pianoMode && !controlsVisible && playing}
+  class:quiet={workspace === 'score' && !controlsVisible && playing}
+  class:exercise-practice={workspace === 'exercises'}
   bind:this={app}
 >
   <input
@@ -1126,14 +1143,18 @@
     </div>
     <div class="document-title">
       <div class="document-heading">
-        <h1>{music ? title : $t('Ouvrir une partition')}</h1>{#if composer}
+        <h1>{workspace === 'exercises' ? $t('Exercices vocaux') : music ? title : $t('Ouvrir une partition')}</h1>{#if composer && workspace !== 'exercises'}
           <p>{composer}</p>
         {/if}
       </div>
       <div class="document-meta">
         <span class="score-facts"
-        >{$t(pianoMode ? 'Piano' : mode === 'horizontal' ? 'Ruban continu' : 'Partition')} · {$t(geometry?.measures.length === 1 ? '{count} mesure' : '{count} mesures', {count: geometry?.measures.length || '—'})}</span>
-        {#if currentPublicPiece}
+        >{#if workspace === 'exercises'}
+            {$t('Studio : {title}', { title: music ? title : $t('Aucune partition ouverte') })}
+          {:else}
+            {$t(workspace === 'piano' ? 'Piano' : mode === 'horizontal' ? 'Ruban continu' : 'Partition')} · {$t(geometry?.measures.length === 1 ? '{count} mesure' : '{count} mesures', {count: geometry?.measures.length || '—'})}
+          {/if}</span>
+        {#if currentPublicPiece && workspace !== 'exercises'}
           <span class="score-credit">
             <a
               class="score-source"
@@ -1328,7 +1349,7 @@
         <div class="mode-controls">
           <div class="mode-switch" aria-label={$t("Mode de lecture")}>
             <button
-              class:active={!pianoMode && mode === 'vertical'}
+              class:active={workspace === 'score' && mode === 'vertical'}
               onclick={() => chooseMode('vertical')}
               title={$t("Partition verticale")}
             >
@@ -1336,7 +1357,7 @@
               /><span>{$t("Partition")}</span>
             </button
             ><button
-              class:active={!pianoMode && mode === 'horizontal'}
+              class:active={workspace === 'score' && mode === 'horizontal'}
               onclick={() => chooseMode('horizontal')}
               title={$t("Ruban horizontal fluide")}
             >
@@ -1344,23 +1365,32 @@
               /><span>{$t("Ruban")}</span>
             </button
             ><button
-              class:active={pianoMode}
-              aria-pressed={pianoMode}
-              onclick={choosePiano}
+              class:active={workspace === 'piano'}
+              aria-pressed={workspace === 'piano'}
+              onclick={() => chooseWorkspace('piano')}
               title={$t("Piano interactif")}
             >
               <Piano size={15}
               /><span>{$t("Piano")}</span>
             </button>
+            <button
+              class:active={workspace === 'exercises'}
+              aria-pressed={workspace === 'exercises'}
+              disabled={takePhase !== 'idle'}
+              onclick={() => chooseWorkspace('exercises')}
+            >
+              <AudioLines size={15} />
+              <span>{$t('Exercices')}</span>
+            </button>
           </div
           ><button
             class="auto-mode"
-            class:active={!pianoMode && preference === 'auto'}
+            class:active={workspace === 'score' && preference === 'auto'}
             onclick={() => chooseMode('auto')}
             title={$t("Adapter le mode à l’orientation du téléphone")}>{$t("Auto")}</button>
         </div>
         <div class="view-controls">
-          {#if !pianoMode}
+          {#if workspace === 'score'}
             <details class="reader-options">
               <summary aria-label={$t("Options de lecture")} title={$t("Options de lecture")}>
                 <MoreHorizontal size={19} />
@@ -1400,7 +1430,7 @@
                 </button>
               </div>
             </details>
-          {/if}{#if !pianoMode}
+          {/if}{#if workspace === 'score'}
             <button
               class="follow-button"
               class:active={follow}
@@ -1434,7 +1464,9 @@
             >
               <Plus size={16} />
             </button>
-          {/if}<button
+          {/if}
+          {#if workspace !== 'exercises'}
+          <button
             class="atelier-button"
             aria-label={$t("Voix & instruments")}
             title={$t("Voix & instruments")}
@@ -1444,7 +1476,9 @@
             <SlidersHorizontal size={18}
             /><span>{$t("Voix & instruments")}</span>
           </button
-          ><button
+          >
+          {/if}
+          <button
             class="icon-button fullscreen-button"
             title={$t("Plein écran (F)")}
             aria-label={$t("Plein écran")}
@@ -1459,7 +1493,7 @@
         </div>
       </div>
 
-      <div class="score-area" class:piano-mode={pianoMode} class:selecting={!!loopSelecting}>
+      <div class="score-area" inert={workspace === 'exercises'} class:piano-mode={workspace === 'piano'} class:selecting={!!loopSelecting}>
         {#if loopSelecting}
           <div class="selection-hint">
             <Repeat2 size={16} />{loopSelecting === 'a' ? $t('Choisissez le début du passage') : $t('Choisissez la dernière note du passage')
@@ -1490,9 +1524,9 @@
           class="score-viewport"
           role="region"
           aria-roledescription={$t("Partition interactive")}
-          aria-hidden={pianoMode}
+          aria-hidden={workspace !== 'score'}
           aria-label={$t("Partition musicale, flèches pour naviguer entre les notes")}
-          tabindex={pianoMode ? -1 : 0}
+          tabindex={workspace !== 'score' ? -1 : 0}
           onkeydown={(event) => { onKey(event); event.stopPropagation(); }}
           class:horizontal={mode === 'horizontal'}
           bind:this={viewport}
@@ -1585,7 +1619,7 @@
             ><button class="text-button" onclick={() => error = ''}>{$t("Fermer")}</button>
           </div>
         {/if}
-        {#if pianoMode}
+        {#if workspace === 'piano'}
           <div class="piano-workspace">
             <PianoKeyboard
               scoreNotes={pianoScoreNotes}
@@ -1597,7 +1631,7 @@
           </div>
         {/if}
       </div>
-      {#if keyboardOpen && !pianoMode}
+      {#if keyboardOpen && workspace === 'score'}
         <div class="reference-keyboard">
           <button
             class="icon-button small close-reference"
@@ -1617,7 +1651,7 @@
         </div>
       {/if}
 
-      <footer class="transport" class:replay-transport={!!replayTake}>
+      <footer class="transport" inert={workspace === 'exercises'} class:replay-transport={!!replayTake}>
         {#if replayTake}
           <audio
             bind:this={replayAudio}
@@ -1795,7 +1829,7 @@
                 class="tool-button keyboard-tool"
                 class:active={keyboardOpen}
                 title={$t("Clavier de référence")}
-                onclick={() => { if (pianoMode) { pianoMode = false; keyboardOpen = true; } else keyboardOpen = !keyboardOpen; }}
+                onclick={() => { if (workspace === 'piano') { workspace = 'score'; keyboardOpen = true; } else keyboardOpen = !keyboardOpen; }}
               >
                 <Piano size={19}
                 /><span>{$t("Clavier")}</span>
@@ -1880,6 +1914,16 @@
           </div>
         {/if}
       </footer>
+      {#if workspace === 'exercises'}
+        {#key libraryScope}
+          <ExerciseView
+            player={audio}
+            scope={libraryScope}
+            blocked={takePhase !== 'idle'}
+            beforeplay={prepareExercise}
+          />
+        {/key}
+      {/if}
     </main>
     {#if mixerOpen}
       <button
