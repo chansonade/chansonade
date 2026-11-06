@@ -1,6 +1,7 @@
 import { derived, get, writable } from 'svelte/store';
 import { appMessages } from './messages-app';
 import { componentMessages } from './messages-components';
+import { readPreference, writePreference } from './preferences';
 
 export type Locale = 'fr' | 'en' | 'de' | 'nl';
 export type MessageParams = Record<string, string | number>;
@@ -31,11 +32,8 @@ function browserLanguage(): Locale {
 }
 
 function readLanguage(): Locale {
-  try {
-    const value = localStorage.getItem(preferenceKey);
-    if (isLocale(value)) return value;
-  } catch { /* Keep the reader usable when browser storage is blocked. */ }
-  return browserLanguage();
+  const value = readPreference(preferenceKey);
+  return isLocale(value) ? value : browserLanguage();
 }
 
 function message(language: Locale, keyFrench: string, params?: MessageParams): string {
@@ -69,8 +67,7 @@ export function initializeLanguage(): void {
 export function setLanguage(language: Locale): void {
   if (!isLocale(language)) return;
   locale.set(language);
-  try { localStorage.setItem(preferenceKey, language); }
-  catch { /* The selected language still works for this page. */ }
+  writePreference(preferenceKey, language);
 }
 
 const noteNames: Record<Locale, readonly string[]> = {

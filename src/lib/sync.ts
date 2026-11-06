@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import { readPreference, writePreference, removePreference } from './preferences';
 import { synchronizeTakes, TakeAPIError } from './take-sync';
 import { forgetAccountScope, syncQueue, rearmRejectedMutations, ANONYMOUS_SCOPE, storageScope, setStorageScope, subscribeStorage, pendingMutations, markMutationSent, releaseRejectedMutation, acceptMutation, applyRemoteChanges, syncCursor, syncConflicts, resolveSyncConflict, claimAnonymousLibrary, type LocalResource, type RemoteResource } from './storage';
 
@@ -11,8 +12,9 @@ export type SyncState = {
   busy: boolean; pending: number; conflicts: LocalResource[]; failures: SyncFailure[]; message: string;
 };
 function cachedUser(): User | null {
+  const cached = readPreference('chansonade.account');
   try {
-    const user = JSON.parse(localStorage.getItem('chansonade.account') || 'null');
+    const user = JSON.parse(cached || 'null');
     return user && typeof user.id === 'string' && typeof user.email === 'string' ? user : null;
   } catch { return null; }
 }
@@ -61,10 +63,8 @@ async function adoptSession(next: Session) {
     controller?.abort();
     setStorageScope(user ? `user:${user.id}` : ANONYMOUS_SCOPE);
   }
-  try {
-    if (user) localStorage.setItem('chansonade.account', JSON.stringify(user));
-    else localStorage.removeItem('chansonade.account');
-  } catch { /* Account isolation is also enforced in memory and by the API. */ }
+  if (user) writePreference('chansonade.account', JSON.stringify(user));
+  else removePreference('chansonade.account');
   update({ user, registration: next.registration, available: true, message: '', ...(changed ? { conflicts: [], failures: [], pending: 0 } : {}), status: user ? 'En attente' : 'Local' });
   const adoptionEpoch = epoch;
   if (fresh && user) await rearmRejectedMutations(`user:${user.id}`);

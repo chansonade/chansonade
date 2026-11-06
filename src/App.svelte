@@ -24,6 +24,7 @@
   import { CaptureTimeline } from './lib/timeline';
   import { finishCapturedTake, takeArchive, TakeMetadataBudget, type TakeCapture } from './lib/take-session';
   import { requestPersistentStorage } from './lib/storage-health';
+  import { readPreference, writePreference } from './lib/preferences';
   import { savedScores, saveScore, scoreId, readSettings, writeSettings, storageScope, subscribeStorage, listTakes, latestTake as loadLatestTake, type SavedScore, type RecordedTake, type TakePitch, type TakeTransport } from './lib/storage';
 
   let engine: Score;
@@ -108,7 +109,7 @@
   let currentMeasure = $state(1);
   let micActive = $state(false);
   let micBusy = $state(false);
-  let microphoneId = $state(localStorage.getItem('chansonade.microphone') || '');
+  let microphoneId = $state(readPreference('chansonade.microphone') || '');
   let microphones = $state<MediaDeviceInfo[]>([]);
   let microphoneLabel = $state('');
   let pitchResult = $state<PitchResult | null>(null);
@@ -386,7 +387,7 @@
     audio.setRate(rate); applyMix(false); syncLoop(false); audioReady = true;
     yield* hydratePractice(scope);
     duration = audio.duration || music.duration;
-    try { localStorage.setItem('chansonade.last', id); } catch { /* Optional preference. */ }
+    writePreference('chansonade.last', id);
   }
 
   function* saveImportedScore(source: Extract<ScoreSource, { kind: 'file' }>, document: ScoreDocument, scope: string): OpeningSteps {
@@ -695,8 +696,9 @@
     catch { microphones = []; }
     microphoneLabel = pitch.inputInfo?.label || '';
   }
-  async function changeMicrophone() {
-    localStorage.setItem('chansonade.microphone', microphoneId);
+  async function changeMicrophone(deviceId: string) {
+    microphoneId = deviceId;
+    writePreference('chansonade.microphone', deviceId);
     if (!micActive) return;
     pitch.stop(); micActive = false; pitchResult = null; pitchError = null;
     await toggleMic();
@@ -1006,7 +1008,7 @@
     });
     const stopSync = startSync();
     void reloadLastTake().catch(() => {});
-    void chooseScore({ kind: 'library', lastId: localStorage.getItem('chansonade.last'), requestedId: requestedCatalogId });
+    void chooseScore({ kind: 'library', lastId: readPreference('chansonade.last'), requestedId: requestedCatalogId });
     if (import.meta.env.PROD && 'serviceWorker' in navigator) void navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL }).catch(() => {});
     return () => {
       disposed = true;
@@ -1135,7 +1137,7 @@
       <aside class="mixer-panel"><div class="section-heading"><span>{$t("Voix & instruments")}</span><button class="icon-button small" aria-label={$t("Fermer les instruments")} onclick={() => mixerOpen = false}><X size={18} /></button></div>
         <label class="target-label" for="voice-target">{$t("VOIX À TRAVAILLER")}</label><select id="voice-target" value={targetChannel} onchange={(event) => setTargetChannel(+event.currentTarget.value)}>{#each parts as part}<option value={part.channel}>{part.name}</option>{/each}</select>
         <div class="instrument-list">{#each parts as part}<div class="instrument-card"><div class="instrument-name"><span class="instrument-icon">{#if part.channel === targetChannel}<Mic size={17} />{:else}<Piano size={17} />{/if}</span><strong>{part.name}</strong><button class="mute-button" class:active={part.muted} title={$t('Couper {name}', {name: part.name})} aria-label={$t('Couper {name}', {name: part.name})} aria-pressed={part.muted} onclick={() => { part.muted = !part.muted; applyMix(); }}>{#if part.muted}<VolumeX size={16} />{:else}<Volume2 size={16} />{/if}</button><button class="solo-button" class:active={part.solo} title={$t('Écouter seulement {name}', {name: part.name})} aria-label={$t('Solo {name}', {name: part.name})} aria-pressed={part.solo} onclick={() => { part.solo = !part.solo; applyMix(); }}>S</button></div><div class="volume-row"><input type="range" min="0" max="127" step="1" value={part.volume} aria-label={$t('Volume {name}', {name: part.name})} oninput={(event) => { part.volume = +event.currentTarget.value; applyMix(); }} /><span>{Math.round(part.volume / 100 * 100)}%</span></div><div class="instrument-details"><select aria-label={$t('Son de {name}', {name: part.name})} value={part.program} onchange={(event) => { part.program = +event.currentTarget.value; applyMix(); }}>{#if !programs.some((p) => p.value === part.program)}<option value={part.program}>{$t("Instrument d’origine")}</option>{/if}{#each programs as program}<option value={program.value}>{$t(program.name)}</option>{/each}</select><div class="transpose-control"><button aria-label={$t('Transposer {name} vers le bas', {name: part.name})} disabled={part.transpose <= -24} onclick={() => { part.transpose--; applyMix(); }}><Minus size={13} /></button><span title={$t("Transposition audio en demi-tons")}>{part.transpose > 0 ? '+' : ''}{part.transpose}</span><button aria-label={$t('Transposer {name} vers le haut', {name: part.name})} disabled={part.transpose >= 24} onclick={() => { part.transpose++; applyMix(); }}><Plus size={13} /></button></div></div></div>{/each}</div>
-        <div class="micro-settings"><div class="section-heading"><span>{$t("RETOUR DE VOIX")}</span><Mic size={15} /></div><p>{$t("La courbe suit votre voix. Sa fin en pointillés réagit immédiatement puis devient pleine après confirmation. Utilisez un casque pour isoler votre voix.")}</p><label for="microphone">{$t("Entrée microphone")}</label><select id="microphone" bind:value={microphoneId} onchange={() => void changeMicrophone()} disabled={micBusy || takePhase !== 'idle'}><option value="">{$t("Par défaut du système")}</option>{#each microphones as device}<option value={device.deviceId}>{device.label || $t('Microphone {number}', {number: microphones.indexOf(device) + 1})}</option>{/each}</select>{#if micActive && microphoneLabel}<p class="microphone-source">{$t('Entrée active : {name}.', {name: microphoneLabel})}{#if /noise|cancel|rnnoise/i.test(microphoneLabel)} {$t("La réduction de bruit peut couper du chant. Essayez l’entrée physique pour comparer.")}{/if}</p>{/if}<label for="latency">{$t("Décalage micro")} <strong>{latency} ms</strong></label><input id="latency" type="range" min="-200" max="400" step="10" bind:value={latency} /><button class="text-button clear-trace" onclick={clearPitchTrace}>{$t("Effacer la courbe")}</button></div>
+        <div class="micro-settings"><div class="section-heading"><span>{$t("RETOUR DE VOIX")}</span><Mic size={15} /></div><p>{$t("La courbe suit votre voix. Sa fin en pointillés réagit immédiatement puis devient pleine après confirmation. Utilisez un casque pour isoler votre voix.")}</p><label for="microphone">{$t("Entrée microphone")}</label><select id="microphone" value={microphoneId} onchange={(event) => void changeMicrophone(event.currentTarget.value)} disabled={micBusy || takePhase !== 'idle'}><option value="">{$t("Par défaut du système")}</option>{#each microphones as device}<option value={device.deviceId}>{device.label || $t('Microphone {number}', {number: microphones.indexOf(device) + 1})}</option>{/each}</select>{#if micActive && microphoneLabel}<p class="microphone-source">{$t('Entrée active : {name}.', {name: microphoneLabel})}{#if /noise|cancel|rnnoise/i.test(microphoneLabel)} {$t("La réduction de bruit peut couper du chant. Essayez l’entrée physique pour comparer.")}{/if}</p>{/if}<label for="latency">{$t("Décalage micro")} <strong>{latency} ms</strong></label><input id="latency" type="range" min="-200" max="400" step="10" bind:value={latency} /><button class="text-button clear-trace" onclick={clearPitchTrace}>{$t("Effacer la courbe")}</button></div>
         <button class="export-button" disabled={!music} onclick={exportPractice}><Download size={15} /> {$t("Exporter le MusicXML original")}</button>
       </aside>
     {/if}

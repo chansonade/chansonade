@@ -1,23 +1,21 @@
 import { writable } from 'svelte/store';
+import { readPreference, writePreference } from './preferences';
 
 export type ThemePreference = 'system' | 'light' | 'dark';
 const key = 'chansonade.theme';
 export const themePreference = writable<ThemePreference>('system');
 let initialized = false;
 
-function readPreference(): ThemePreference {
-  try {
-    const value = localStorage.getItem(key);
-    if (value === 'light' || value === 'dark') return value;
-  } catch { /* A blocked preference must not prevent using the reader. */ }
-  return 'system';
+function readTheme(): ThemePreference {
+  const value = readPreference(key);
+  return value === 'light' || value === 'dark' ? value : 'system';
 }
 
 export function initializeTheme() {
   if (initialized) return;
   initialized = true;
   const media = window.matchMedia('(prefers-color-scheme: dark)');
-  let preference = readPreference();
+  let preference = readTheme();
   themePreference.set(preference);
   const apply = () => {
     const resolved = preference === 'system' ? media.matches ? 'dark' : 'light' : preference;
@@ -28,14 +26,14 @@ export function initializeTheme() {
   themePreference.subscribe((value) => { preference = value; apply(); });
   media.addEventListener('change', apply);
   window.addEventListener('storage', (event) => {
-    if (event.key === key || event.key === null) themePreference.set(readPreference());
+    if (event.key === key || event.key === null) themePreference.set(readTheme());
   });
 }
 
 export function cycleTheme() {
   themePreference.update((current) => {
     const next = current === 'system' ? 'light' : current === 'light' ? 'dark' : 'system';
-    try { localStorage.setItem(key, next); } catch { /* Keep the current choice in memory. */ }
+    writePreference(key, next);
     return next;
   });
 }

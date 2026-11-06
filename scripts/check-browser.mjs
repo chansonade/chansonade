@@ -197,6 +197,147 @@ try {
   assert.deepEqual(isolation, { accountA: 0, accountB: 1, anonymous: 1 });
   console.log('PASS browser: scoped IndexedDB and account deletion reject stale writes without touching other scopes');
 
+  // localStorage is optional; IndexedDB, session isolation and live choices remain usable.
+  const preferenceAccount = { id: 'ci-preference-user', email: 'preferences@example.invalid' };
+  const preferenceXML = title => `<?xml version="1.0"?><score-partwise version="4.0"><work><work-title>${title}</work-title></work><part-list><score-part id="P1"><part-name>Piano</part-name><midi-instrument id="I1"><midi-channel>1</midi-channel><midi-program>1</midi-program></midi-instrument></score-part></part-list><part id="P1">${Array.from({ length: 4 }, (_, index) => `<measure number="${index + 1}">${index ? '' : '<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes><direction><sound tempo="120"/></direction>'}<note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note></measure>`).join('')}</part></score-partwise>`;
+  for (const failure of ['getter', 'read', 'last-read', 'write', 'available', 'invalid-json', 'invalid-shape']) {
+    const preferenceContext = await isolatedContext();
+    await preferenceContext.route('**/preference-fixture', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><html lang="fr"><head><meta name="theme-color" content="#fff"></head><body><div id="app"></div></body></html>' }));
+    await preferenceContext.route('**/scores/*', route => new URL(route.request().url()).pathname.endsWith('catalog.json') ? route.continue() : route.fulfill({ contentType: 'application/xml', body: preferenceXML('Synthetic catalogue') }));
+    const accepted = new Map(); let preferenceRevision = 0, preferenceUser = preferenceAccount;
+    await preferenceContext.route('**/api/v1/**', route => {
+      const request = route.request(), path = new URL(request.url()).pathname.split('/api/v1/')[1];
+      if (path === 'session') {
+        if (request.method() === 'DELETE') preferenceUser = null;
+        return route.fulfill({ json: { user: preferenceUser, registration: 'open' } });
+      }
+      assert.equal(request.headers()['x-chansonade-user'], preferenceAccount.id);
+      if (path === 'mutations') {
+        const results = request.postDataJSON().mutations.map(mutation => {
+          const resource = accepted.get(mutation.mutationId) || { kind: mutation.kind, id: mutation.id, data: mutation.data, deleted: mutation.deleted, revision: ++preferenceRevision };
+          accepted.set(mutation.mutationId, resource);
+          return { mutationId: mutation.mutationId, status: 'applied', resource };
+        });
+        return route.fulfill({ json: { results } });
+      }
+      if (path === 'changes') return route.fulfill({ json: { cursor: preferenceRevision, changes: [] } });
+      if (path === 'takes') return route.fulfill({ json: { takes: [] } });
+      if (path.startsWith('takes/') && request.method() === 'POST') return route.fulfill({ json: { take: { ready: true } } });
+      throw Error(`Unexpected preference fixture request: ${request.method()} ${path}`);
+    });
+    const preferencePage = await preferenceContext.newPage();
+    await preferencePage.emulateMedia({ colorScheme: 'dark' });
+    await preferencePage.goto(`${url}/preference-fixture`);
+    const seeded = await preferencePage.evaluate(async ({ account, xml, failure }) => {
+      const s = await import('/src/lib/storage.ts');
+      const id = await s.scoreId(xml);
+      await s.saveScore({ id, xml, title: 'Synthetic retained A', composer: 'Synthetic', added: 1 }, `user:${account.id}`);
+      await s.saveScore({ id: 'other-preference-score', xml, title: 'Synthetic retained B', composer: 'Synthetic', added: 1 }, 'user:preference-other');
+      const storage = window.localStorage, get = Storage.prototype.getItem;
+      storage.setItem('chansonade.microphone', 'synthetic-one'); storage.setItem('chansonade.last', id);
+      const invalid = failure === 'invalid-json' || failure === 'invalid-shape';
+      storage.setItem('chansonade.language', invalid ? 'invalid-locale' : 'de'); storage.setItem('chansonade.theme', invalid ? 'invalid-theme' : 'light');
+      storage.setItem('chansonade.account', failure === 'invalid-json' ? '{' : JSON.stringify(failure === 'invalid-shape' ? { id: 42, email: account.email } : { ...account, email: 'stale-preferences@example.invalid' }));
+      window.__storedPreference = key => get.call(storage, key);
+      window.__microphoneRequests = []; window.__microphoneStops = 0;
+      const getUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+      navigator.mediaDevices.getUserMedia = async constraints => {
+        window.__microphoneRequests.push(constraints.audio?.deviceId?.exact || '');
+        const stream = await getUserMedia(constraints);
+        for (const track of stream.getTracks()) { const stop = track.stop.bind(track); track.stop = () => { window.__microphoneStops++; stop(); }; }
+        return stream;
+      };
+      navigator.mediaDevices.enumerateDevices = async () => ['one', 'two'].map(name => ({ deviceId: `synthetic-${name}`, kind: 'audioinput', label: `Synthetic microphone ${name}`, groupId: 'synthetic' }));
+      if (failure === 'getter') Object.defineProperty(window, 'localStorage', { configurable: true, get() { throw new DOMException('Synthetic storage getter denial', 'SecurityError'); } });
+      else if (failure === 'read' || failure === 'last-read') Storage.prototype.getItem = function(key) {
+        if (failure === 'read' || key === 'chansonade.last') throw new DOMException('Synthetic preference read denial', 'SecurityError');
+        return get.call(this, key);
+      };
+      else if (failure === 'write') {
+        Storage.prototype.setItem = Storage.prototype.removeItem = () => { throw new DOMException('Synthetic preference quota', 'QuotaExceededError'); };
+      }
+      const sync = await import('/src/lib/sync.ts');
+      let cached; const unsubscribe = sync.syncState.subscribe(state => cached = state.user); unsubscribe();
+      return { id, cached };
+    }, { account: preferenceAccount, xml: preferenceXML('Synthetic retained A'), failure });
+    const retainedId = seeded.id;
+    const invalidValues = failure === 'invalid-json' || failure === 'invalid-shape';
+    const readsBlocked = failure === 'getter' || failure === 'read';
+    const fallbackValues = readsBlocked || invalidValues;
+    assert.deepEqual(seeded.cached, fallbackValues ? null : { ...preferenceAccount, email: 'stale-preferences@example.invalid' }, `${failure}: cached identity is parsed and validated before checking the server`);
+    await preferencePage.evaluate(async () => { await import('/src/main.ts'); });
+    await preferencePage.evaluate(async () => { await (await import('/src/lib/sync.ts')).synchronize(); });
+    const expectedTitle = ['getter', 'read', 'last-read', 'invalid-json', 'invalid-shape'].includes(failure) ? await preferencePage.evaluate(async () => (await import('/src/lib/score.ts')).examples[0].title) : 'Synthetic retained A';
+    await preferencePage.waitForFunction(title => document.querySelector('h1')?.textContent === title && document.querySelector('.play-button')?.disabled === false && !document.querySelector('.loading-overlay') && !document.querySelector('.play-button .spin'), expectedTitle);
+    assert.equal(await preferencePage.locator('html').getAttribute('lang'), fallbackValues ? 'fr' : 'de');
+    assert.equal(await preferencePage.locator('html').getAttribute('data-theme'), fallbackValues ? 'dark' : 'light');
+    // Bring every scenario to French using a real preference control.
+    await preferencePage.locator('.language-picker summary').click();
+    await preferencePage.locator('.language-picker').getByRole('button', { name: 'Français', exact: true }).click();
+    await preferencePage.locator('.mic-button').click();
+    await preferencePage.waitForFunction(() => document.querySelector('.mic-button.active') && !document.querySelector('.mic-button:disabled'));
+    await preferencePage.locator('.atelier-button').click();
+    assert.equal(await preferencePage.locator('#microphone').inputValue(), readsBlocked ? '' : 'synthetic-one');
+    await preferencePage.locator('#microphone').selectOption('synthetic-two');
+    await preferencePage.waitForFunction(() => !document.querySelector('#microphone').disabled && document.querySelector('.mic-button.active'));
+    assert.deepEqual(await preferencePage.evaluate(() => window.__microphoneRequests), [readsBlocked ? '' : 'synthetic-one', 'synthetic-two'], `${failure}: the selected device must be applied even without persistence`);
+    assert.equal(await preferencePage.evaluate(() => window.__microphoneStops), 1);
+    await preferencePage.locator('.mixer-panel').getByRole('button', { name: 'Fermer les instruments', exact: true }).click();
+    await preferencePage.locator('.play-button').click();
+    await preferencePage.waitForFunction(() => document.querySelector('.play-button.is-playing'));
+    await preferencePage.locator('.language-picker summary').click();
+    await preferencePage.locator('.language-picker').getByRole('button', { name: 'English', exact: true }).click();
+    const previousTheme = await preferencePage.locator('html').getAttribute('data-theme');
+    await preferencePage.locator('.theme-toggle').click();
+    assert.equal(await preferencePage.locator('html').getAttribute('lang'), 'en');
+    assert.notEqual(await preferencePage.locator('html').getAttribute('data-theme'), previousTheme);
+    assert(await preferencePage.locator('.play-button.is-playing').count(), 'Language and theme remain usable without restarting playback');
+    assert.equal(await preferencePage.evaluate(() => window.__microphoneRequests.length), 2, 'Language and theme do not restart the microphone');
+    await preferencePage.locator('.language-picker summary').click();
+    await preferencePage.locator('.language-picker').getByRole('button', { name: 'Français', exact: true }).click();
+    await preferencePage.locator('.play-button').click();
+    await preferencePage.getByRole('button', { name: 'Enregistrer un essai', exact: true }).click();
+    await preferencePage.locator('.take-button.recording').waitFor();
+    await preferencePage.waitForTimeout(250); // Real synthetic WAV frames, before the count-in completes.
+    await preferencePage.getByRole('button', { name: 'Arrêter l’essai', exact: true }).click();
+    await preferencePage.waitForFunction(() => { const button = document.querySelector('.take-button'); return button && !button.disabled && !button.classList.contains('recording'); });
+    const importedTitle = `Synthetic preference import ${failure}`;
+    await preferencePage.locator('input[type="file"]').setInputFiles({ name: 'preference-import.musicxml', mimeType: 'application/xml', buffer: Buffer.from(preferenceXML(importedTitle)) });
+    await preferencePage.waitForFunction(title => document.querySelector('h1')?.textContent === title && !document.querySelector('.loading-overlay') && document.querySelector('.play-button')?.disabled === false && !document.querySelector('.play-button .spin'), importedTitle);
+    await preferencePage.evaluate(async () => { await (await import('/src/lib/sync.ts')).synchronize(); });
+    const stored = await preferencePage.evaluate(async () => {
+      const s = await import('/src/lib/storage.ts');
+      const scores = await s.savedScores(), [summary] = await s.listTakes(), take = summary ? await s.getTake(summary.id) : null;
+      const sync = await import('/src/lib/sync.ts');
+      let user; const unsubscribe = sync.syncState.subscribe(state => user = state.user); unsubscribe();
+      return { scope: s.storageScope(), user, scores, take: take && { audioBytes: take.audio.size, samples: take.samples }, other: await s.savedScores('user:preference-other'), microphone: window.__storedPreference('chansonade.microphone'), last: window.__storedPreference('chansonade.last'), language: window.__storedPreference('chansonade.language'), theme: window.__storedPreference('chansonade.theme'), account: window.__storedPreference('chansonade.account'), errors: document.querySelectorAll('.error-card').length };
+    });
+    assert.equal(stored.scope, `user:${preferenceAccount.id}`); assert(stored.scores.some(score => score.id === retainedId));
+    assert(stored.scores.some(score => score.title === importedTitle)); assert(!stored.scores.some(score => score.id === 'other-preference-score'));
+    assert.equal(stored.other[0].title, 'Synthetic retained B'); assert(stored.take?.audioBytes > 44 && stored.take.samples > 0); assert.equal(stored.errors, 0);
+    if (failure === 'getter' || failure === 'write') { assert.equal(stored.microphone, 'synthetic-one'); assert.equal(stored.last, retainedId); }
+    else { assert.equal(stored.microphone, 'synthetic-two'); assert.equal(stored.last, stored.scores.find(score => score.title === importedTitle).id); }
+    assert.deepEqual(stored.user, preferenceAccount, 'The confirmed identity is independent of the optional account cache');
+    if (failure === 'getter' || failure === 'write') {
+      assert.equal(stored.language, 'de'); assert.equal(stored.theme, 'light');
+      assert.deepEqual(JSON.parse(stored.account), { ...preferenceAccount, email: 'stale-preferences@example.invalid' });
+    } else {
+      assert.equal(stored.language, 'fr'); assert.equal(stored.theme, fallbackValues ? 'light' : 'dark');
+      assert.deepEqual(JSON.parse(stored.account), preferenceAccount, 'Session confirmation refreshes the persisted identity');
+    }
+    await preferencePage.locator('.mic-button').click();
+    await preferencePage.evaluate(async () => { await (await import('/src/lib/sync.ts')).logout(); });
+    const loggedOut = await preferencePage.evaluate(async () => {
+      const s = await import('/src/lib/storage.ts'), sync = await import('/src/lib/sync.ts');
+      let user; const unsubscribe = sync.syncState.subscribe(state => user = state.user); unsubscribe();
+      return { user, scope: s.storageScope(), account: window.__storedPreference('chansonade.account'), scores: await s.savedScores('user:ci-preference-user'), takes: await s.listTakes('user:ci-preference-user'), other: await s.savedScores('user:preference-other') };
+    });
+    assert.equal(loggedOut.user, null); assert.equal(loggedOut.scope, 'anonymous');
+    assert.equal(loggedOut.account, failure === 'getter' || failure === 'write' ? stored.account : null, 'Removing the optional cache must not prevent logout');
+    assert.equal(loggedOut.scores.length, stored.scores.length); assert.equal(loggedOut.takes.length, 1); assert.equal(loggedOut.other[0].title, 'Synthetic retained B');
+    console.log(`PASS optional preferences ${failure}: defaults/validation, live microphone/theme/language, import/WAV, account cache update/removal and scope isolation`);
+  }
+
   // Delay only delivery of real synthetic detector output, including its flush.
   const musicalContext = await isolatedContext();
   await musicalContext.route('**/api/v1/**', route => route.fulfill({ json: { user: null, registration: 'open' } }));
