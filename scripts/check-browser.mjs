@@ -197,6 +197,96 @@ try {
   assert.deepEqual(isolation, { accountA: 0, accountB: 1, anonymous: 1 });
   console.log('PASS browser: scoped IndexedDB and account deletion reject stale writes without touching other scopes');
 
+  // A microphone owns its context listener, even when the audio context outlives it.
+  const lifecycleContext = await isolatedContext();
+  await lifecycleContext.route('**/microphone-lifecycle', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Synthetic microphone lifecycle</title>' }));
+  const lifecyclePage = await lifecycleContext.newPage(); await lifecyclePage.goto(`${url}/microphone-lifecycle`);
+  const lifecycle = await lifecyclePage.evaluate(async () => {
+    const { PitchInput } = await import('/src/lib/pitch.ts');
+    const check = (condition, message) => { if (!condition) throw Error(message); };
+    const add = AudioContext.prototype.addEventListener, remove = AudioContext.prototype.removeEventListener;
+    const listeners = new Map();
+    const count = context => listeners.get(context)?.size || 0;
+    AudioContext.prototype.addEventListener = function(type, listener, options) {
+      if (type === 'statechange') {
+        if (!listeners.has(this)) listeners.set(this, new Set());
+        listeners.get(this).add(listener);
+      }
+      return add.call(this, type, listener, options);
+    };
+    AudioContext.prototype.removeEventListener = function(type, listener, options) {
+      if (type === 'statechange') listeners.get(this)?.delete(listener);
+      return remove.call(this, type, listener, options);
+    };
+    const shared = new AudioContext();
+    let foreignChanges = 0, onInterruption;
+    const foreignListener = () => foreignChanges++;
+    add.call(shared, 'statechange', foreignListener);
+    const interruptions = [];
+    const input = new PitchInput(() => {}, () => {}, reason => { interruptions.push(reason); onInterruption?.(reason); });
+    const getUserMedia = navigator.mediaDevices.getUserMedia;
+    try {
+      for (let cycle = 0; cycle < 3; cycle++) {
+        await input.start(shared);
+        check(count(shared) === 1, 'One microphone listener must be registered per connection');
+        input.stop(); input.stop();
+        check(count(shared) === 0, 'Stopping must remove the exact statechange listener');
+        check(shared.state === 'running', 'Stopping the microphone must leave its shared context open');
+        await shared.suspend(); await shared.resume();
+      }
+      await new Promise(resolve => setTimeout(resolve, 0));
+      check(foreignChanges > 0 && interruptions.length === 0, 'Other listeners survive; stopped sessions do not report context changes');
+      await input.start(shared);
+      await input.startRecording();
+      const deadline = performance.now() + 5000;
+      while (!input.recordingData?.chunks.length) {
+        check(performance.now() < deadline, 'The synthetic worklet must deliver recorded samples before interruption');
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      const interrupted = new Promise(resolve => { onInterruption = resolve; });
+      await shared.suspend(); await interrupted;
+      check(!input.active && interruptions.length === 1 && interruptions[0] === 'interrupted', 'The listener still interrupts an active microphone exactly once');
+      const partial = await input.stopRecording();
+      check(partial.samples > 0 && partial.audio.size === 44 + partial.samples * 2 && partial.analysisComplete === false, 'Interruption preserves delivered raw WAV frames');
+      input.stop();
+      check(count(shared) === 0 && shared.state === 'suspended', 'Cleanup detaches the listener after an interruption without closing the shared context');
+      await shared.resume();
+      await input.start();
+      const owned = [...listeners.keys()].find(context => count(context) === 1);
+      check(owned && owned !== shared, 'An owned context also receives one listener');
+      input.stop();
+      check(count(owned) === 0, 'An owned context loses its listener before close');
+      await owned.close().catch(() => {});
+      check(owned.state === 'closed', 'The owned context closes normally');
+      const failing = new AudioContext();
+      failing.createMediaStreamSource = () => {
+        check(count(failing) === 1, 'The synthetic connection failure occurs after listener registration');
+        throw Error('Synthetic media source failure');
+      };
+      let sourceFailure;
+      try { await input.start(failing); } catch (cause) { sourceFailure = cause.message; }
+      check(sourceFailure === 'Synthetic media source failure' && count(failing) === 0 && !input.active, 'Failed connection cleanup removes the registered listener');
+      check(failing.state === 'running', 'A failed connection does not close a shared context');
+      navigator.mediaDevices.getUserMedia = async () => { throw new DOMException('Synthetic microphone denial', 'NotAllowedError'); };
+      let permissionFailure;
+      try { await input.start(shared); } catch (cause) { permissionFailure = cause.name; }
+      check(permissionFailure === 'NotAllowedError' && count(shared) === 0, 'Failure before registration is safe to clean up');
+      navigator.mediaDevices.getUserMedia = getUserMedia;
+      await input.start(shared); input.stop();
+      check([...listeners.values()].every(registered => registered.size === 0), 'Reconnects and failures leave no context listeners behind');
+      check(interruptions.length === 1, 'Closing stopped contexts does not report another interruption');
+      return { cycles: 3, interruptions, partialSamples: partial.samples };
+    } finally {
+      navigator.mediaDevices.getUserMedia = getUserMedia;
+      input.stop();
+      remove.call(shared, 'statechange', foreignListener);
+      for (const context of new Set([shared, ...listeners.keys()])) if (context.state !== 'closed') await context.close();
+      AudioContext.prototype.addEventListener = add; AudioContext.prototype.removeEventListener = remove;
+    }
+  });
+  assert.equal(lifecycle.cycles, 3); assert.deepEqual(lifecycle.interruptions, ['interrupted']); assert(lifecycle.partialSamples > 0);
+  console.log('PASS browser: microphone context listeners detach on repeated stop, interruption and failed start; shared/owned context lifetimes and partial WAV preserved');
+
   // localStorage is optional; IndexedDB, session isolation and live choices remain usable.
   const preferenceAccount = { id: 'ci-preference-user', email: 'preferences@example.invalid' };
   const preferenceXML = title => `<?xml version="1.0"?><score-partwise version="4.0"><work><work-title>${title}</work-title></work><part-list><score-part id="P1"><part-name>Piano</part-name><midi-instrument id="I1"><midi-channel>1</midi-channel><midi-program>1</midi-program></midi-instrument></score-part></part-list><part id="P1">${Array.from({ length: 4 }, (_, index) => `<measure number="${index + 1}">${index ? '' : '<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes><direction><sound tempo="120"/></direction>'}<note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note></measure>`).join('')}</part></score-partwise>`;

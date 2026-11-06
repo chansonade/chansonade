@@ -57,6 +57,7 @@ const captureModules = new WeakMap<AudioContext, Promise<void>>();
 
 export class PitchInput {
   private context: AudioContext | null = null;
+  private contextStateChange: (() => void) | null = null;
   private ownsContext = false;
   private stream: MediaStream | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
@@ -300,7 +301,8 @@ export class PitchInput {
       this.capture = capture;
       capture.onprocessorerror = () => { if (revision === this.revision) this.interruptCapture(false); };
       stream.getAudioTracks().forEach(track => track.addEventListener('ended', () => { if (revision === this.revision) this.interruptCapture(true); }, { once: true }));
-      context.addEventListener('statechange', () => { if (revision === this.revision && this.running && context.state !== 'running') this.interruptCapture(false); });
+      this.contextStateChange = () => { if (revision === this.revision && this.running && context.state !== 'running') this.interruptCapture(false); };
+      context.addEventListener('statechange', this.contextStateChange);
       worker.onerror = worker.onmessageerror = () => {
         if (revision !== this.revision || worker !== this.worker) return;
         this.workerFailed = true;
@@ -355,6 +357,8 @@ export class PitchInput {
     ++this.revision;
     this.running = false;
     this.interrupted = false;
+    if (this.contextStateChange) this.context?.removeEventListener('statechange', this.contextStateChange);
+    this.contextStateChange = null;
     this.previewCallback([]);
     this.starting = null;
     this.source?.disconnect();
