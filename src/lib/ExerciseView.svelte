@@ -3,7 +3,7 @@
   import { ChevronLeft, ChevronRight, Play, Square, Music2 } from '@lucide/svelte';
   import type { ExerciseSession, ExerciseSessionState, ExercisePitch } from './exercise-session';
   import ExercisePlot from './ExercisePlot.svelte';
-  import { t, locale, noteName } from './i18n';
+  import { t, noteFormatter } from './i18n';
   import {
     EXERCISES, VOICE_RANGES, EXERCISE_PITCH_LIMITS, createExercisePassage,
     exerciseTonicBounds, normalizeExercisePreferences, stepExercise,
@@ -36,18 +36,28 @@
   const pitches = Array.from({ length: EXERCISE_PITCH_LIMITS.high - EXERCISE_PITCH_LIMITS.low + 1 }, (_, i) => i + EXERCISE_PITCH_LIMITS.low);
   const previous = $derived(stepExercise(settings, -1));
   const next = $derived(stepExercise(settings, 1));
-  const phase = $derived(playback.phase === 'preparing' ? shown?.mode === 'listen' ? 'Préparation des instruments…' : 'Préparation du micro et des instruments…'
-    : playback.phase === 'playing' ? shown?.mode === 'solo' ? 'Chantez après l’accord de départ.' : shown?.mode === 'guide' ? 'Chantez avec le guide.' : 'Écoutez le motif.'
-    : playback.phase === 'ended' ? 'Passage terminé. Recommencez ou changez de tonalité.'
-    : playback.phase === 'stopped' ? 'Passage arrêté. La courbe reste affichée.' : 'Prêt à commencer.');
-  const label = (midi: number) => noteName(midi, $locale);
+  const hasCue = $derived(!!shown?.notes.some(note => note.role === 'cue'));
+  const phase = $derived.by(() => {
+    switch (playback.phase) {
+      case 'preparing':
+        return shown?.mode === 'listen' ? 'Préparation des instruments…' : 'Préparation du micro et des instruments…';
+      case 'playing':
+        if (shown?.mode === 'listen') return 'Écoutez le motif.';
+        if (shown?.mode === 'guide') return 'Chantez avec le guide.';
+        return hasCue ? 'Chantez après l’accord de départ.' : 'Chantez sans référence sonore.';
+      case 'ended': return 'Passage terminé. Recommencez ou changez de tonalité.';
+      case 'stopped': return 'Passage arrêté. La courbe reste affichée.';
+      default: return 'Prêt à commencer.';
+    }
+  });
+  const label = (midi: number) => $noteFormatter(midi);
   const latest = $derived(pending.at(-1) ?? confirmed.at(-1));
   const measuredMidi = $derived(latest && latest.frequency > 0 ? 69 + 12 * Math.log2(latest.frequency / 440) : null);
   const cents = $derived(latest?.cents === null || latest?.cents === undefined ? null : Math.round(latest.cents));
   function refresh() {
     playback = session.state;
     confirmed = session.confirmed; pending = session.pending;
-    microphoneActive = session.microphoneActive; canStop = session.canStop;
+    canStop = session.canStop;
   }
   function stop() { session.stop(); refresh(); }
   function save(value: ExercisePreferences) {
@@ -87,6 +97,7 @@
     else if (event.key === 'Escape') { event.preventDefault(); stop(); }
   }
   onMount(() => {
+    const stopObservingMicrophone = session.subscribeMicrophone(state => { microphoneActive = state === 'active'; });
     const observePreferences = subscribeExercisePreferences(scope, () => {
       const saved = readExercisePreferences(scope);
       if (JSON.stringify(saved) === JSON.stringify(settings)) return;
@@ -98,7 +109,7 @@
     window.addEventListener('keydown', keydown);
     return () => {
       disposed = true;
-      cancelAnimationFrame(frame); observePreferences();
+      cancelAnimationFrame(frame); observePreferences(); stopObservingMicrophone();
       window.removeEventListener('keydown', keydown);
     };
   });
@@ -182,7 +193,18 @@
           else e.currentTarget.value = String(settings.bpm);
         }} />
       </label>
+      <label class="cue-choice">
+        <input
+          type="checkbox"
+          checked={settings.cue}
+          onchange={e => change({ ...settings, cue: e.currentTarget.checked })}
+        />
+        <span>{$t('Accord de départ')}</span>
+      </label>
     </fieldset>
+    {#if !settings.cue}
+      <p class="microphone-help">{$t('Sans accord, le motif commence immédiatement. En mode Seul, aucun son n’est joué.')}</p>
+    {/if}
 
     {#if !settings.voice}
       <p class="exercise-notice">{$t('Choisissez une tessiture pour commencer, puis adaptez les notes basse et haute à votre voix.')}</p>
@@ -276,7 +298,7 @@
         <span>{$t('Stop')}</span>
       </button>
     </div>
-    <p>{$t('Écouter : piano seul. Avec guide : chantez avec le piano. Seul : l’accord, puis votre voix.')}</p>
+    <p>{$t(settings.cue ? 'Écouter : piano seul. Avec guide : chantez avec le piano. Seul : l’accord, puis votre voix.' : 'Écouter : piano seul. Avec guide : chantez avec le piano. Seul : votre voix sans référence sonore.')}</p>
     <p class="shortcut-help">{$t('Espace : rejouer · Flèches : changer de tonalité · Échap : arrêter')}</p>
   </footer>
 </section>
@@ -293,6 +315,8 @@
   .motif-choice, fieldset > label:nth-of-type(2) { grid-column: span 2; }
   label { display: flex; flex-direction: column; min-width: 0; gap: 7px; font-size: 12px; color: var(--subtle); }
   select, input { width: 100%; min-height: 44px; font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+  .cue-choice { grid-column: 1 / -1; flex-direction: row; align-items: center; min-height: 44px; cursor: pointer; }
+  .cue-choice input { width: 22px; min-height: 22px; height: 22px; padding: 0; accent-color: var(--accent); }
   .exercise-notice { border-left: 3px solid var(--accent); background: var(--accent-soft); padding: 12px 14px; margin-top: 18px; font-size: 13px; line-height: 1.6; }
   .tonality { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; margin: 24px 0 14px; }
   .tonality > div > span { display: block; font-size: 11px; color: var(--subtle); margin-bottom: 4px; }

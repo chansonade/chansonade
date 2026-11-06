@@ -47,10 +47,14 @@ le même AudioContext, distinct du synthétiseur de la partition.
 
 ## Modèle des exercices
 
-`exercises.ts` fournit le domaine de la vue dédiée. Les sept motifs majeurs
-décrivent leurs degrés, durées en pulsations, syllabes (paroles non traduites) et articulation.
-Un accord de tonique à l'octave inférieure dure une pulsation, suivi d'une
-pulsation de silence. Les tessitures proposées sont indicatives et éditables ;
+`exercises.ts` fournit le domaine de la vue dédiée. Les neuf motifs majeurs
+(gammes de 3, 4 et 5 notes, puis arpèges et motifs courts) décrivent leurs degrés,
+durées en pulsations, syllabes (paroles non traduites) et articulation.
+L'accord de tonique facultatif (présent par défaut, préférence du compte) à
+l'octave inférieure dure une pulsation, suivie d'une pulsation de silence. Sans
+accord, aucune note ni pulsation d'introduction n'est réservée : le motif commence
+à t=0, sans décompte. Avec guide et Seul préparent le micro avant ce départ ;
+le curseur donne le repère visuel. Les tessitures proposées sont indicatives et éditables ;
 leurs bornes réelles sont l'unique valeur conservée, sans catégorie de voix doublée.
 Les étendues personnalisées restent dans les fréquences déjà prises en charge par
 le détecteur, dont les paramètres ne changent pas. Aucun profil n'est présumé au
@@ -72,20 +76,25 @@ avec piano sur les canaux 0 (accord) et 1 (guide), des note-off explicites et la
 fin du passage après son dernier créneau. Un All Notes Off terminal conserve
 cette durée pour Spessa, qui ignore la fin de piste seule pour calculer sa durée.
 Écouter et Avec guide ont le même son ;
-Seul garde seulement l'accord mais conserve toutes les notes attendues et la même
-durée silencieuse. Aucun MusicXML, ressource de bibliothèque, prise ou protocole
+Seul garde seulement l'accord choisi mais conserve toutes les notes attendues et
+la durée du motif. Sans accord, Seul est entièrement silencieux : l'aide l'annonce
+explicitement, la courbe et le curseur restent actifs. `exerciseSoundingNotes`
+définit les notes jouées pour le MIDI et l'ouverture de la sortie auxiliaire ;
+un passage entièrement silencieux garde cette sortie fermée, même pour les queues
+d'effets du passage précédent. Aucun MusicXML, ressource de bibliothèque, prise ou protocole
 serveur n'est ajouté.
 
 `AudioPlayer.prepareAuxiliary()` prépare l'instrument et son contexte sans
-commencer de notes, pour ouvrir le micro sur cette même horloge avant l'accord.
+commencer de notes, pour ouvrir le micro sur cette même horloge avant le début du passage.
 `AudioPlayer.startExercise(passage)` charge ce MIDI dans un séquenceur secondaire,
 sur le synthétiseur auxiliaire déjà utilisé par le piano. Il ne modifie ni le
 séquenceur, ni le tempo, ni le mix de la partition. Le Worklet programme les notes ;
 aucun timer d'interface ne donne la pulsation. Le démarrage renvoie
 `{startedAt, duration}` en secondes AudioContext : `startedAt` est l'origine du
 calendrier pour l'affichage et le micro, pas l'heure de réception sur le thread
-principal. Un adaptateur typé, confiné à `audio.ts`, lit l'horodatage des messages
-Spessa `timeChange` que son callback public ne transmet pas. La régression audio
+principal. Un adaptateur typé, confiné à `audio.ts`, lit l'horodatage
+du premier événement de tempo à t=0 effectivement joué par Spessa (pas le
+`timeChange` émis au chargement). Son callback public omet cet horodatage. La régression audio
 vérifie cette origine avec le thread principal bloqué ; une mise à jour Spessa
 doit préserver ce contrat. `exerciseState` expose préparation, lecture, fin et
 temps écoulé ; `stopAuxiliary()` arrête le séquenceur, relâche toutes les notes
@@ -113,7 +122,7 @@ est partagé selon la propriété décrite ci-dessous.
 Une prise réelle bloque l'entrée et les départs.
 
 `ExerciseView.svelte` possède les réglages et les commandes. Écouter joue le motif ;
-Avec guide joue le même piano et trace la voix ; Seul garde l'accord et toute la
+Avec guide joue le même piano et trace la voix ; Seul garde l'accord éventuel et toute la
 fenêtre silencieuse, en traçant aussi la voix. Précédent/suivant changent la
 tonique puis rejouent selon la dernière action ; les bornes du domaine rendent les
 pas impossibles indisponibles. Le piano-roll montre les notes chantées du même
@@ -121,7 +130,7 @@ calendrier et un curseur lu sur l'horloge AudioContext du passage ; rAF sert
 uniquement au dessin, jamais aux pulsations. Les commandes occupent un pied de vue de hauteur
 stable ; seul le panneau supérieur défile, y compris en paysage. Espace rejoue,
 les flèches changent la tonalité et Échap arrête, hors champs, dialogues et clavier
-Piano. Langue et thème ne relancent ni le son ni le micro.
+Piano. Langue, notation des notes et thème ne relancent ni le son ni le micro.
 
 L'application construit une seule instance `PitchInput`. `MicrophoneSession`
 attribue l'ouverture au premier demandeur (studio, prise ou exercices) ; les
@@ -131,11 +140,15 @@ Une libération ne ferme que l'entrée dont ce demandeur est propriétaire. Ains
 répéter ou changer de tonalité conserve le micro ; sortir, Stop, blur, arrière-plan
 ou changement de compte ferme celui ouvert par les exercices, sans fermer celui
 du studio. Le propriétaire d'une prise est libéré après sa sauvegarde. Le pilote,
-le filtrage secteur, YIN et le décodeur restent identiques.
+le filtrage secteur, YIN et le décodeur restent identiques. `PitchInput` notifie
+les transitions de son état physique (repos, démarrage, actif), y compris refus et
+interruption ; `MicrophoneSession` relaie cet abonnement au studio et aux exercices.
+L'interface ne sonde pas cet état dans une boucle d'animation. Une capture
+interrompue au repos n'est plus empruntable : le prochain départ la rouvre.
 
 Écouter ne demande pas le micro et ne trace pas la voix ; il libère une entrée
 ouverte par les exercices mais laisse une entrée du studio intacte. Avec guide
-et Seul ouvrent ou réutilisent le micro avant l'accord. Une permission refusée ou
+et Seul ouvrent ou réutilisent le micro avant la première pulsation, avec ou sans accord. Une permission refusée ou
 annulée empêche le départ sonore ; une réponse tardive ne le relance pas. Après
 la fin naturelle, le micro reste disponible pour répéter et livrer les dernières
 confirmations ; les mesures hors passage ne grossissent pas l'historique.
@@ -159,7 +172,10 @@ frontière reste pointillée si le décodeur ne l'a pas confirmée. Tout le pass
 conservé, sans horizon glissant. `ExercisePlot` partage un seul axe MIDI absolu
 entre notes attendues et mesures, étendu aux hauteurs réellement observées pour
 rendre aussi les octaves fausses visibles ; il ne recale jamais la voix sur une
-note. L'écart numérique en cents utilise la note attendue à l'instant de capture,
+note. Les repères textuels de l'axe sont sélectionnés selon leur écart vertical
+(minimum 18 pixels), avec priorité aux extrêmes attendus : une note tenue, deux
+notes voisines ou une grande erreur d'octave ne superposent pas leurs étiquettes.
+La grille et les hauteurs tracées restent inchangées. L'écart numérique en cents utilise la note attendue à l'instant de capture,
 avec le contexte musical figé. Il ne mesure pas la nuance. L'état est annoncé
 au changement de phase ; la lecture numérique continue n'est pas une région live.
 
@@ -352,20 +368,31 @@ Les [instructions de sources](SOURCES.md) expliquent la reconstruction et les
 archives tierces ; les [règles de publication](PUBLISHING.md) indiquent ce qui ne doit
 jamais entrer dans le dépôt public.
 
-## Langue de l’interface
+## Préférences d’affichage
 
 `i18n.ts` fournit un store de langue FR/EN/DE/NL et un traducteur réactif, avec
 interpolation de paramètres nommés. Les clés sont les textes français ; les
 dictionnaires `messages-app.ts` et `messages-components.ts` portent les trois
 traductions. Une clé inconnue conserve son texte source, notamment pour les erreurs
-techniques provenant du navigateur. `LanguagePicker.svelte` affiche le menu de langue.
+techniques provenant du navigateur. `DisplayPreferences.svelte` regroupe langue
+et notation à côté du thème.
 
 Avant le montage, `initializeLanguage()` reprend `chansonade.language` ou la langue
 navigateur prise en charge, avec anglais par défaut. Le choix met à jour `html.lang`
 et les autres onglets via l’événement storage. Cette préférence appartient à
-l’appareil et ne fait pas partie des réglages synchronisés. Les notes du piano et
-les dates suivent la langue ; titres, paroles et noms utilisateur ne sont pas traduits.
-La traduction ne participe pas aux dépendances de gravure ni au cycle audio.
+l’appareil et ne fait pas partie des réglages synchronisés. Les dates suivent la
+langue ; titres, paroles et noms utilisateur ne sont pas traduits.
+
+La notation, dans `chansonade.note-notation` via `preferences.ts`, est elle aussi
+locale à l'appareil, indépendante du compte : « Selon la langue » par défaut,
+« Do ré mi » ou « C D E ». La notation forcée C D E emploie les noms anglais,
+donc B pour si ; le mode selon la langue conserve H en allemand. `noteName` est
+la seule table de noms ; le store dérivé `noteFormatter` rend ses consommateurs
+réactifs (exercices, axes, claviers complet/compact, repère micro et étendues du
+catalogue). Les modifications sont immédiates, conservées après rechargement et
+reçues des autres onglets. Une préférence invalide ou illisible revient au défaut ;
+un refus d'écriture n'empêche pas le changement d'affichage en mémoire.
+Ces préférences ne participent ni aux dépendances de gravure ni au cycle audio/micro.
 
 ## Protections et régressions
 

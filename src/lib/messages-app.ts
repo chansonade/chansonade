@@ -1,6 +1,17 @@
 // French source text is the stable key. Musical titles, lyrics and user data
 // remain unchanged; named placeholders are interpolated by the i18n runtime.
 const messages: readonly [string, string, string, string][] = [
+  ["Accord de départ", "Opening chord", "Anfangsakkord", "Beginakkoord"],
+  ["Sans accord, le motif commence immédiatement. En mode Seul, aucun son n’est joué.", "Without the chord, the pattern starts immediately. On your own plays no sound.", "Ohne Akkord beginnt das Motiv sofort. Im Modus Allein wird kein Ton gespielt.", "Zonder akkoord begint het patroon meteen. Bij Zelf zingen wordt geen geluid gespeeld."],
+  ["Chantez sans référence sonore.", "Sing without a reference sound.", "Singe ohne Referenzton.", "Zing zonder referentietoon."],
+  ["Écouter : piano seul. Avec guide : chantez avec le piano. Seul : votre voix sans référence sonore.", "Listen: piano only. With guide: sing along with the piano. On your own: your voice without a reference sound.", "Anhören: nur Klavier. Mit Begleitung: singe zum Klavier. Allein: deine Stimme ohne Referenzton.", "Luisteren: alleen piano. Met begeleiding: zing met de piano mee. Zelf zingen: je stem zonder referentietoon."],
+  ["Gamme de trois notes", "Three-note scale", "Dreitonleiter", "Toonladder van drie noten"],
+  ["Gamme de quatre notes", "Four-note scale", "Viertonleiter", "Toonladder van vier noten"],
+  ["Préférences d’affichage", "Display preferences", "Anzeigeeinstellungen", "Weergavevoorkeuren"],
+  ["Notation des notes", "Note notation", "Notennamen", "Notennotatie"],
+  ["Selon la langue", "Follow language", "Nach Sprache", "Volgens de taal"],
+  ["Do ré mi", "Do re mi", "Do re mi", "Do re mi"],
+  ["C D E", "C D E", "C D E", "C D E"],
   ["Préparation du micro et des instruments…", "Preparing microphone and instruments…", "Mikrofon und Instrumente werden vorbereitet…", "Microfoon en instrumenten voorbereiden…"],
   ["Passage arrêté. La courbe reste affichée.", "Passage stopped. The trace remains visible.", "Passage gestoppt. Die Kurve bleibt sichtbar.", "Passage gestopt. De curve blijft zichtbaar."],
   ["Avec guide", "With guide", "Mit Begleitung", "Met begeleiding"],

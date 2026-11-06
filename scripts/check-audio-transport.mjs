@@ -162,22 +162,17 @@ try {
           instrument.output.connect(output.node);
 
           // Stall delivery of the start acknowledgement, not the audio renderer.
-          const proto = Object.getPrototypeOf(instrument.sequencer);
-          const timeDescriptor = Object.getOwnPropertyDescriptor(proto, 'currentTime');
+          const play = instrument.sequencer.play;
           let stallEnd = 0;
-          Object.defineProperty(instrument.sequencer, 'currentTime', {
-            configurable: true,
-            set(value) {
-              timeDescriptor.set.call(this, value);
-              const end = performance.now() + 1250;
-              while (performance.now() < end) { /* deliberate main-thread stall */ }
-              stallEnd = audio.context.currentTime;
-            },
-            get() { return timeDescriptor.get.call(this); },
-          });
+          instrument.sequencer.play = function () {
+            play.call(this);
+            const end = performance.now() + 1250;
+            while (performance.now() < end) { /* deliberate main-thread stall */ }
+            stallEnd = audio.context.currentTime;
+          };
           let start;
           try { start = await audio.startExercise(passage()); }
-          finally { delete instrument.sequencer.currentTime; }
+          finally { instrument.sequencer.play = play; }
           check(start && stallEnd - start.startedAt > 1, 'origin must be the Worklet clock before the blocked main thread received it');
           check(audio.auxiliary === instrument && audio.sequencer === primary, 'reuse piano synth and leave score sequencer intact');
           audio.pianoNoteOff(84); // stale keyboard cleanup must not stop the exercise
@@ -198,6 +193,38 @@ try {
             return sample.time - onset;
           });
           check(snapshot() === before, 'exercise must preserve score position, rate, program, transpose, gain and mute');
+
+          const immediate = createExercisePassage({
+            exerciseId: 'hum', bpm: 160, step: 1, cue: false, voice: { low: 48, high: 84, tonic: 60 },
+          }, 'guide');
+          const directStart = await audio.startExercise(immediate);
+          await sleep(120);
+          const directNotes = stampEvents.filter(note => note.time >= directStart.startedAt);
+          check(directNotes.length === 1 && directNotes[0].channel === 1 && directNotes[0].midiNote === 60,
+            'without cue the first sound is the first melody note, never a chord');
+          check(Math.abs(directNotes[0].time - directStart.startedAt) < 1e-9,
+            'the first sounding note starts at t=0 on the returned Worklet origin: ' + JSON.stringify({ directNotes, directStart }));
+          check(output.samples.some(sample => sample.time >= directStart.startedAt && sample.time < directStart.startedAt + .08 && sample.rms > .001),
+            'the first melody note is audible immediately');
+          const directOffsets = [directNotes[0].time - directStart.startedAt];
+          for (let repeat = 0; repeat < 5; repeat++) {
+            const origin = await audio.startExercise(immediate);
+            await sleep(80);
+            const notes = stampEvents.filter(note => note.time >= origin.startedAt);
+            check(notes.length === 1 && notes[0].channel === 1 && notes[0].midiNote === 60,
+              'each cue-less replacement starts the melody exactly once');
+            directOffsets.push(notes[0].time - origin.startedAt);
+          }
+          check(directOffsets.every(offset => Math.abs(offset) < 1e-9),
+            'cue-less starts align exactly to their playback origin: ' + JSON.stringify(directOffsets));
+          const silentStart = await audio.startExercise({ ...immediate, mode: 'solo' });
+          await sleep(700);
+          const silentOutput = output.samples.filter(sample => sample.time > silentStart.startedAt + .05);
+          check(silentOutput.length > 100 && silentOutput.every(sample => sample.rms < .00001),
+            'solo without cue stays silent, including the previous melody’s effect tails');
+          check(!stampEvents.some(note => note.time >= silentStart.startedAt), 'solo without cue never sends a note-on');
+          check(audio.exerciseState.phase === 'playing', 'silent solo preserves its full practice calendar');
+          check(snapshot() === before, 'optional cue never changes the score transport or mix');
 
           // Solo retains the entire silent singing window (no guide events/audio).
           const solo = await audio.startExercise(passage('solo'));
@@ -299,7 +326,7 @@ try {
             'destroy during initialization must neither recreate a context nor start notes');
 
           voice.node.disconnect(); output.node.disconnect();
-          return { offsets, audibleOffsets, originDelay: stallEnd - start.startedAt, duration: start.duration, soloDuration: solo.duration };
+          return { offsets, audibleOffsets, directOffsets, originDelay: stallEnd - start.startedAt, duration: start.duration, soloDuration: solo.duration };
         } finally { await audio.destroy(); }
       })();
     };

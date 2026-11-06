@@ -1,5 +1,5 @@
 import { Sequencer, WorkletSynthesizer, type BasicSynthesizerReturnMessage } from 'spessasynth_lib';
-import { exerciseMIDI, exerciseSecondsAt, type ExercisePassage } from './exercises';
+import { exerciseMIDI, exerciseSecondsAt, exerciseSoundingNotes, type ExercisePassage } from './exercises';
 import processorUrl from 'spessasynth_lib/dist/spessasynth_processor.min.js?url';
 
 const clamp = (value: number, min: number, max: number) =>
@@ -40,9 +40,9 @@ type AuxiliaryInstrument = {
   output: GainNode;
 };
 
-/** Start acknowledgement uses the processor clock, never main-thread receipt time.
- * Spessa's public timeChange callback omits this timestamp. Keep its typed wire
- * adapter here; dependency upgrades must retain the audio-clock regression. */
+/** The initial tempo event marks actual playback, including silent solo passages.
+ * Loading also emits timeChange; that is not a playback acknowledgement. Read
+ * the processor timestamp here, never main-thread receipt time. */
 function startExerciseSequence(instrument: AuxiliaryInstrument, signal: AbortSignal): Promise<number | null> {
   return new Promise((resolve, reject) => {
     const cleanup = () => {
@@ -53,9 +53,11 @@ function startExerciseSequence(instrument: AuxiliaryInstrument, signal: AbortSig
     const cancel = () => { cleanup(); resolve(null); };
     const receive = (event: MessageEvent<BasicSynthesizerReturnMessage[]>) => {
       for (const message of event.data) {
-        if (message.type !== 'sequencerReturn' || message.data.type !== 'timeChange') continue;
+        if (message.type !== 'sequencerReturn' || message.data.type !== 'metaEvent') continue;
+        const midi = message.data.data.event;
+        if (midi.statusByte !== 0x51 || midi.ticks !== 0) continue;
         cleanup();
-        resolve(message.currentTime - message.data.data.newTime);
+        resolve(message.currentTime);
         return;
       }
     };
@@ -66,11 +68,9 @@ function startExerciseSequence(instrument: AuxiliaryInstrument, signal: AbortSig
     if (signal.aborted) { cancel(); return; }
     instrument.node.port.addEventListener('message', receive);
     signal.addEventListener('abort', cancel, { once: true });
-    // Like score playback, seek after unpausing to avoid Spessa's paused snap.
-    try {
-      instrument.sequencer.play();
-      instrument.sequencer.currentTime = 0;
-    } catch (error) { cleanup(); reject(error); }
+    // Each freshly loaded exercise starts at zero; one play command is enough.
+    try { instrument.sequencer.play(); }
+    catch (error) { cleanup(); reject(error); }
   });
 }
 
@@ -397,7 +397,8 @@ export class AudioPlayer {
         const instrument = this.auxiliary!;
         await loadSequence(instrument.sequencer, exerciseMIDI(passage), 'exercice.mid');
         if (this.auxiliaryActivity !== activity) return null;
-        instrument.output.gain.value = 1;
+        // A silent passage must also silence the previous program’s effect tails.
+        instrument.output.gain.value = exerciseSoundingNotes(passage).length ? 1 : 0;
         const startedAt = await startExerciseSequence(instrument, activity.cancellation.signal);
         if (startedAt === null || this.auxiliaryActivity !== activity) return null;
         activity.start = { startedAt, duration: exerciseSecondsAt(passage, passage.durationTicks) };

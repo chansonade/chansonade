@@ -15,6 +15,13 @@ const arpeggioSteps = [
 ] as const satisfies readonly ExerciseStep[];
 
 export const EXERCISES = [
+  { id: 'three-note', nameKey: 'Gamme de trois notes', gate: 0.9, steps: [
+    [1, 1, 'mi'], [2, 1, 'me'], [3, 1, 'ma'], [2, 1, 'me'], [1, 2, 'mi'],
+  ] },
+  { id: 'four-note', nameKey: 'Gamme de quatre notes', gate: 0.9, steps: [
+    [1, 1, 'mi'], [2, 1, 'me'], [3, 1, 'ma'], [4, 1, 'mo'],
+    [3, 1, 'ma'], [2, 1, 'me'], [1, 2, 'mi'],
+  ] },
   { id: 'five-note', nameKey: 'Gamme de cinq notes', gate: 0.9, steps: [
     [1, 1, 'mi'], [2, 1, 'me'], [3, 1, 'ma'], [4, 1, 'mo'], [5, 1, 'mu'],
     [4, 1, 'mo'], [3, 1, 'ma'], [2, 1, 'me'], [1, 2, 'mi'],
@@ -34,6 +41,7 @@ export type ExercisePreferences = {
   exerciseId: ExerciseId;
   bpm: number;
   step: 1 | 2;
+  cue: boolean;
   /** Null until the singer chooses an extent; the preset label is derived from its bounds. */
   voice: (VocalRange & { tonic: number }) | null;
 };
@@ -54,7 +62,7 @@ export const EXERCISE_PITCH_LIMITS = {
 export const EXERCISE_TICKS_PER_BEAT = 480;
 const major = [0, 2, 4, 5, 7, 9, 11];
 const cue = { degrees: [1, 3, 5], octave: -1, beats: 1, restBeats: 1 } as const;
-const defaults: ExercisePreferences = { exerciseId: 'five-note', bpm: 80, step: 1, voice: null };
+const defaults: ExercisePreferences = { exerciseId: 'five-note', bpm: 80, step: 1, cue: true, voice: null };
 const offset = (degree: number) => major[(degree - 1) % 7] + 12 * Math.floor((degree - 1) / 7);
 const definition = (id: unknown) => EXERCISES.find(exercise => exercise.id === id);
 const validBpm = (value: unknown): value is number => Number.isInteger(value) && Number(value) >= 40 && Number(value) <= 160;
@@ -89,7 +97,7 @@ export function normalizeExercisePreferences(value: unknown): ExercisePreference
       voice = { ...range, tonic: bounds ? Math.max(bounds.low, Math.min(bounds.high, requested)) : range.low };
     }
   }
-  return { exerciseId, voice, bpm: validBpm(value.bpm) ? value.bpm : defaults.bpm, step: value.step === 2 ? 2 : 1 };
+  return { exerciseId, voice, bpm: validBpm(value.bpm) ? value.bpm : defaults.bpm, step: value.step === 2 ? 2 : 1, cue: value.cue !== false };
 }
 
 /** A manual chromatic step never wraps or silently clamps at an extent boundary. */
@@ -126,10 +134,15 @@ export function createExercisePassage(preferences: ExercisePreferences, mode: Ex
   const bounds = exerciseTonicBounds(preferences.exerciseId, preferences.voice), tonic = preferences.voice.tonic;
   if (!bounds || !Number.isInteger(tonic) || tonic < bounds.low || tonic > bounds.high) throw new Error('Ce motif dépasse votre étendue vocale.');
   const ticks = EXERCISE_TICKS_PER_BEAT;
-  const notes: ExerciseNote[] = cue.degrees.map(degree => ({
-    role: 'cue', midi: tonic + offset(degree) + 12 * cue.octave, startTick: 0, endTick: cue.beats * ticks, syllable: '',
-  }));
-  let start = (cue.beats + cue.restBeats) * ticks;
+  const notes: ExerciseNote[] = [];
+  let start = 0;
+  if (preferences.cue !== false) {
+    for (const degree of cue.degrees) notes.push({
+      role: 'cue', midi: tonic + offset(degree) + 12 * cue.octave,
+      startTick: 0, endTick: cue.beats * ticks, syllable: '',
+    });
+    start = (cue.beats + cue.restBeats) * ticks;
+  }
   for (const [degree, beats, syllable] of exercise.steps) {
     notes.push({ role: 'voice', midi: tonic + offset(degree), startTick: start, endTick: start + Math.round(beats * ticks * exercise.gate), syllable });
     start += beats * ticks;
@@ -143,6 +156,11 @@ export function exerciseSecondsAt(passage: ExercisePassage, tick: number): numbe
   return tick / EXERCISE_TICKS_PER_BEAT * tempoMicros(passage.bpm) / 1_000_000;
 }
 
+/** The expected melody remains present even when the whole exercise is silent. */
+export function exerciseSoundingNotes(passage: ExercisePassage): readonly ExerciseNote[] {
+  return passage.mode === 'solo' ? passage.notes.filter(note => note.role === 'cue') : passage.notes;
+}
+
 /** Minimal SMF type 0 encoder for the compiled passage, not a general MIDI editor. */
 export function exerciseMIDI(passage: ExercisePassage): ArrayBuffer {
   const tempo = tempoMicros(passage.bpm);
@@ -150,8 +168,7 @@ export function exerciseMIDI(passage: ExercisePassage): ArrayBuffer {
     { tick: 0, bytes: [0xff, 0x51, 3, tempo >> 16, (tempo >> 8) & 255, tempo & 255] },
     { tick: 0, bytes: [0xc0, 0] }, { tick: 0, bytes: [0xc1, 0] },
   ];
-  for (const note of passage.notes) {
-    if (note.role === 'voice' && passage.mode === 'solo') continue;
+  for (const note of exerciseSoundingNotes(passage)) {
     const channel = note.role === 'cue' ? 0 : 1;
     events.push({ tick: note.startTick, bytes: [0x90 + channel, note.midi, channel ? 90 : 60] });
     events.push({ tick: note.endTick, bytes: [0x80 + channel, note.midi, 0] });

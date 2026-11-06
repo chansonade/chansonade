@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { t, locale, noteName } from './i18n';
+  import { t, noteFormatter } from './i18n';
   import { onMount } from 'svelte';
   import { ChevronLeft, ChevronRight, Crosshair, Keyboard, Mic, Minus, Plus, Music2 } from '@lucide/svelte';
 
@@ -29,7 +29,7 @@
   let pcBase = $state(48);
   let pressedNotes = $state<number[]>([]);
   let visibleRange = $state<[number, number]>([36, 72]);
-  const viewRange = $derived(`${noteName(visibleRange[0], $locale)} – ${noteName(visibleRange[1], $locale)}`);
+  const viewRange = $derived(`${$noteFormatter(visibleRange[0])} – ${$noteFormatter(visibleRange[1])}`);
   let canPanLeft = $state(true);
   let canPanRight = $state(true);
   let previousViewportWidth = 0;
@@ -49,7 +49,7 @@
   const frequency = $derived(validPitch === null ? null : 440 * 2 ** ((validPitch - 69) / 12));
   const marker = $derived(validPitch !== null && validPitch >= 21 && validPitch <= 108 ? pitchPosition(validPitch) : null);
 
-  function label(midi: number) { return noteName(midi, $locale); }
+  function label(midi: number) { return $noteFormatter(midi); }
   function keyPosition(midi: number) {
     return black(midi) ? whites.filter((white) => white < midi).length : (whiteIndex.get(midi) ?? 0) + 0.5;
   }

@@ -3,11 +3,13 @@ import { appMessages } from './messages-app';
 import { componentMessages } from './messages-components';
 import { readPreference, writePreference } from './preferences';
 
+export type NoteNotation = 'language' | 'solfege' | 'english';
 export type Locale = 'fr' | 'en' | 'de' | 'nl';
 export type MessageParams = Record<string, string | number>;
 export type Translator = (keyFrench: string, params?: MessageParams) => string;
 
 const preferenceKey = 'chansonade.language';
+const notationKey = 'chansonade.note-notation';
 const supported: readonly Locale[] = ['fr', 'en', 'de', 'nl'];
 const dictionaries: Record<Exclude<Locale, 'fr'>, Record<string, string>> = {
   en: { ...appMessages.en, ...componentMessages.en },
@@ -16,6 +18,7 @@ const dictionaries: Record<Exclude<Locale, 'fr'>, Record<string, string>> = {
 };
 
 export const locale = writable<Locale>('en');
+export const noteNotation = writable<NoteNotation>('language');
 let initialized = false;
 
 function isLocale(value: unknown): value is Locale {
@@ -53,14 +56,16 @@ export function translate(keyFrench: string, params?: MessageParams): string {
   return message(get(locale), keyFrench, params);
 }
 
-/** Run once before mounting. The language belongs to this browser, not a user account. */
+/** Run once before mounting. Language and note notation belong to this device. */
 export function initializeLanguage(): void {
   if (initialized) return;
   initialized = true;
   locale.set(readLanguage());
+  noteNotation.set(readNotation());
   locale.subscribe(language => { document.documentElement.lang = language; });
   window.addEventListener('storage', event => {
     if (event.key === preferenceKey || event.key === null) locale.set(readLanguage());
+    if (event.key === notationKey || event.key === null) noteNotation.set(readNotation());
   });
 }
 
@@ -70,6 +75,19 @@ export function setLanguage(language: Locale): void {
   writePreference(preferenceKey, language);
 }
 
+function isNoteNotation(value: unknown): value is NoteNotation {
+  return value === 'language' || value === 'solfege' || value === 'english';
+}
+function readNotation(): NoteNotation {
+  const value = readPreference(notationKey);
+  return isNoteNotation(value) ? value : 'language';
+}
+export function setNoteNotation(value: NoteNotation): void {
+  if (!isNoteNotation(value)) return;
+  noteNotation.set(value);
+  writePreference(notationKey, value);
+}
+
 const noteNames: Record<Locale, readonly string[]> = {
   fr: ['Do', 'Do♯', 'Ré', 'Ré♯', 'Mi', 'Fa', 'Fa♯', 'Sol', 'Sol♯', 'La', 'La♯', 'Si'],
   en: ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'],
@@ -77,11 +95,16 @@ const noteNames: Record<Locale, readonly string[]> = {
   nl: ['C', 'Cis', 'D', 'Dis', 'E', 'F', 'Fis', 'G', 'Gis', 'A', 'Ais', 'B'],
 };
 
-export function noteName(midi: number, language: Locale = get(locale)): string {
+export function noteName(midi: number, language: Locale = get(locale), notation: NoteNotation = get(noteNotation)): string {
   if (!Number.isFinite(midi) || midi < 0) return '—';
   const rounded = Math.round(midi);
-  return `${noteNames[language][rounded % 12]}${Math.floor(rounded / 12) - 1}`;
+  const names = noteNames[notation === 'solfege' ? 'fr' : notation === 'english' ? 'en' : language];
+  return `${names[rounded % 12]}${Math.floor(rounded / 12) - 1}`;
 }
+
+/** One reactive formatter for every displayed pitch, independent of audio/score state. */
+export const noteFormatter = derived([locale, noteNotation], ([language, notation]) =>
+  (midi: number) => noteName(midi, language, notation));
 
 export function formatDate(timestamp: number, language: Locale = get(locale)): string {
   return new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(timestamp);

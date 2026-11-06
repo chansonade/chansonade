@@ -2,6 +2,8 @@ import { microphoneWav } from './wav';
 import { PITCH_CONFIG } from './pitch-config';
 import { recordingMaxSamples } from './recording-limits';
 
+export type MicrophoneState = 'idle' | 'starting' | 'active';
+
 export interface PitchResult {
   frequency: number;
   /** Most probable acoustic candidate before temporal decoding. */
@@ -52,6 +54,7 @@ const captureModules = new WeakMap<AudioContext, Promise<void>>();
 
 export class PitchInput {
   private context: AudioContext | null = null;
+  private readonly stateListeners = new Set<(state: MicrophoneState) => void>();
   private contextStateChange: (() => void) | null = null;
   private ownsContext = false;
   private stream: MediaStream | null = null;
@@ -76,6 +79,16 @@ export class PitchInput {
   private flushWaiters = new Map<number, RecordingWaiter<void>>();
 
   constructor(private readonly callback: (result: PitchResult) => void, private readonly previewCallback: (results: PitchResult[]) => void = () => {}, private readonly onRecordingEnd: (reason: RecordingEndReason) => void = () => {}) {}
+
+  get state(): MicrophoneState {
+    return this.interrupted ? 'idle' : this.running ? 'active' : this.starting ? 'starting' : 'idle';
+  }
+  subscribeState(listener: (state: MicrophoneState) => void): () => void {
+    this.stateListeners.add(listener);
+    listener(this.state);
+    return () => { this.stateListeners.delete(listener); };
+  }
+  private notifyState() { for (const listener of this.stateListeners) listener(this.state); }
 
   get contextClock(): AudioContext | null { return this.context; }
 
@@ -193,6 +206,7 @@ export class PitchInput {
     if (this.interrupted) return;
     this.interrupted = true;
     this.running = false;
+    this.notifyState();
     const recording = this.recordingData;
     if (recording) {
       recording.interrupted = true;
@@ -240,10 +254,11 @@ export class PitchInput {
     const revision = ++this.revision;
     const pending = this.connect(sharedAudioContext, revision, deviceId);
     this.starting = pending;
+    this.notifyState();
     try {
       await pending;
     } finally {
-      if (this.starting === pending) this.starting = null;
+      if (this.starting === pending) { this.starting = null; this.notifyState(); }
     }
   }
 
@@ -338,6 +353,7 @@ export class PitchInput {
       // sending microphone audio to speakers (and without acoustic feedback).
       capture.connect(context.destination);
       this.running = true;
+      this.notifyState();
     } catch (error) {
       if (revision === this.revision) this.stop();
       throw error;
@@ -356,8 +372,9 @@ export class PitchInput {
     this.interrupted = false;
     if (this.contextStateChange) this.context?.removeEventListener('statechange', this.contextStateChange);
     this.contextStateChange = null;
-    this.previewCallback([]);
     this.starting = null;
+    this.notifyState();
+    this.previewCallback([]);
     this.source?.disconnect();
     this.source = null;
     this.mainsFilter?.disconnect();

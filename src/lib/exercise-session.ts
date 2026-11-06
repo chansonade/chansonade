@@ -1,7 +1,7 @@
 import type { AudioPlayer, ExerciseStart } from './audio';
 import { exerciseSecondsAt, type ExercisePassage } from './exercises';
 import type { MicrophoneSession } from './microphone';
-import type { PitchResult } from './pitch';
+import type { PitchResult, MicrophoneState } from './pitch';
 
 export type ExercisePitch = { captureTime: number; time: number; frequency: number; expectedMidi: number | null; cents: number | null };
 export type ExerciseSessionState =
@@ -124,7 +124,7 @@ export class ExerciseSession {
   get confirmed() { return this.project(this.run?.confirmed ?? []); }
   get pending() { return this.project(this.run?.pending ?? []); }
   get canStop() { return (!!this.run && this.run.stoppedAt === null) || this.microphone.owner === 'exercises'; }
-  get microphoneActive() { return this.microphone.active; }
+  subscribeMicrophone(listener: (state: MicrophoneState) => void) { return this.microphone.subscribe(listener); }
   get state(): ExerciseSessionState {
     const run = this.run;
     if (!run) return { phase: 'idle' };

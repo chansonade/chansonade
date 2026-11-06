@@ -8,7 +8,7 @@ POC web de lecture de partitions, chant et piano. Priorité au fonctionnement et
 - `npm run build` : vérification Svelte/TypeScript, compilation, offre source et cache hors ligne. `npm run preview` permet d'essayer la production.
 - Les partitions, la gravure, la synthèse, le piano et l'analyse du micro restent dans le navigateur. Le serveur de synchronisation est un projet privé distinct, jamais inclus dans les sources publiques.
 - Tous les assets et le service worker respectent `CHANSONADE_BASE_PATH`. Ne jamais intercepter ou mettre en cache les réponses API.
-- L’interface propose FR/EN/DE/NL : `i18n.ts` fournit `t`, avec clés françaises et paramètres nommés dans `messages-app.ts` / `messages-components.ts`. Traduire textes, aides et attributs accessibles ; conserver titres, paroles, noms personnels et valeurs internes. La langue est une préférence locale ; son changement ne doit pas relancer la lecture, le micro ou la gravure.
+- L’interface propose FR/EN/DE/NL : `i18n.ts` fournit `t`, avec clés françaises et paramètres nommés dans `messages-app.ts` / `messages-components.ts`. Traduire textes, aides et attributs accessibles ; conserver titres, paroles, noms personnels et valeurs internes. La langue et la notation des notes (selon la langue / Do ré mi / C D E anglais) sont des préférences locales de l’appareil ; leur changement ne doit pas relancer la lecture, le micro ou la gravure.
 - Le thème utilise `html[data-theme="light"|"dark"]`. Préférer les variables sémantiques et conserver une gravure lisible dans les deux thèmes.
 
 ## Vues et audio

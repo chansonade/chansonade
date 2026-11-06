@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { t, locale, noteName } from './i18n';
+  import { t, noteFormatter } from './i18n';
   import { exerciseSecondsAt, type ExercisePassage } from './exercises';
   import type { ExercisePitch, ExerciseSessionState } from './exercise-session';
 
@@ -26,7 +26,7 @@
   const duration = $derived(passage ? exerciseSecondsAt(passage, passage.durationTicks) : 1);
   const x = (seconds: number) => 48 + seconds / duration * (width - 64);
   const y = (midi: number) => 20 + (high - midi) / Math.max(1, high - low) * 150;
-  const label = (midi: number) => noteName(midi, $locale);
+  const label = (midi: number) => $noteFormatter(midi);
   function path(samples: ExercisePitch[]): string {
     const commands: string[] = [];
     let previous: ExercisePitch | null = null;
@@ -39,6 +39,14 @@
     if (previous) commands.push('l0,0.1');
     return commands.join(' ');
   }
+  const axisLabels = $derived.by(() => {
+    const selected: number[] = [];
+    const candidates = [lowest, highest, ...rows.filter(midi => midi % 12 === 0), low, high];
+    for (const midi of candidates) {
+      if (selected.every(other => Math.abs(y(other) - y(midi)) >= 18)) selected.push(midi);
+    }
+    return new Set(selected);
+  });
   const confirmedPath = $derived(path(confirmed));
   const pendingPath = $derived(path(pending.length && confirmed.length ? [confirmed[confirmed.length - 1], ...pending] : pending));
   onMount(() => {
@@ -53,12 +61,14 @@
     {#if passage}
       {#each rows as midi}
         <line x1="43" x2={width - 12} y1={y(midi)} y2={y(midi)} class="pitch-grid" />
-        {#if midi === lowest || midi === highest || midi % 12 === 0 || midi === low || midi === high}
-          <text x="2" y={y(midi) + 4} class="pitch-label">{label(midi)}</text>
+        {#if axisLabels.has(midi)}
+          <text x="2" y={y(midi) + 4} class="pitch-label pitch-axis-label">{label(midi)}</text>
         {/if}
       {/each}
-      <rect x={x(0)} y="10" width={x(exerciseSecondsAt(passage, cueEnd)) - x(0)} height="172" class="cue-band" />
-      <text x={x(0)} y="204" class="pitch-label">{$t('Accord')}</text>
+      {#if cueEnd > 0}
+        <rect x={x(0)} y="10" width={x(exerciseSecondsAt(passage, cueEnd)) - x(0)} height="172" class="cue-band" />
+        <text x={x(0)} y="204" class="pitch-label">{$t('Accord')}</text>
+      {/if}
       {#each notes as note}
         <rect
           x={x(exerciseSecondsAt(passage, note.startTick))}

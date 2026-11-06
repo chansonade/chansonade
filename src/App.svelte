@@ -12,9 +12,9 @@
   import ThemeToggle from './lib/ThemeToggle.svelte';
   import RepositoryLink from './lib/RepositoryLink.svelte';
   import Brand from './lib/Brand.svelte';
-  import LanguagePicker from './lib/LanguagePicker.svelte';
+  import DisplayPreferences from './lib/DisplayPreferences.svelte';
   import { MAX_SCORE_ARCHIVE_BYTES, checkScoreMetadata } from './lib/score-import';
-  import { t, locale, noteName } from './lib/i18n';
+  import { t, noteFormatter } from './lib/i18n';
   import TakePanel from './lib/TakePanel.svelte';
   import { takeMoment, takePitchSamples, takePitchCount, takeTraceStarts } from './lib/take-playback';
   import LibraryTree, { type LibraryNavigation, type LibraryReveal } from './lib/LibraryTree.svelte';
@@ -23,7 +23,7 @@
   import { projectOrganization, type Organization } from './lib/organization';
   import { measuresInLoop, canonicalLoopBounds } from './lib/loop';
   import { syncState, startSync, setTakeSyncPaused } from './lib/sync';
-  import { PitchInput, type PitchResult, type RecordingEndReason } from './lib/pitch';
+  import { PitchInput, type MicrophoneState, type PitchResult, type RecordingEndReason } from './lib/pitch';
   import { projectPitchTrace, type PitchSample } from './lib/projection';
   import { CaptureTimeline } from './lib/timeline';
   import { finishCapturedTake, takeArchive, TakeMetadataBudget, type TakeCapture } from './lib/take-session';
@@ -119,8 +119,9 @@
   let loopFirstEnd = 0;
   let pianoFrame = $state<MusicalData['frames'][number] | undefined>(undefined);
   let currentMeasure = $state(1);
-  let micActive = $state(false);
-  let micBusy = $state(false);
+  let microphoneState = $state<MicrophoneState>('idle');
+  const micActive = $derived(microphoneState === 'active');
+  const micBusy = $derived(microphoneState === 'starting');
   let microphoneId = $state(readPreference('chansonade.microphone') || '');
   let microphones = $state<MediaDeviceInfo[]>([]);
   let microphoneLabel = $state('');
@@ -212,7 +213,7 @@
   function timeLabel(value: number) {
     return `${Math.floor(value / 60)}:${String(Math.floor(value % 60)).padStart(2, '0')}`;
   }
-  function noteLabel(midi: number) { return noteName(midi, $locale); }
+  function noteLabel(midi: number) { return $noteFormatter(midi); }
   function notify(message: string) {
     if (disposed) return;
     toast = message;
@@ -581,7 +582,6 @@
   function animate(now: number) {
     const dt = Math.min(0.1, (now - previousFrame) / 1000 || 0.016);
     previousFrame = now;
-    micActive = micSession.active; micBusy = micSession.starting;
     const looped = audio.update();
     const replayTime = replayTake && replayAudio ? replayAudio.currentTime : 0;
     const time = replayTake ? Math.min(duration, takeMoment(replayTake, replayTime).scoreTime) : audioReady ? audio.time : position;
@@ -1043,6 +1043,7 @@
     engine = new Score();
     pitch = new PitchInput(receivePitch, receivePreview, recordingEnded);
     micSession = new MicrophoneSession(pitch);
+    const stopObservingMicrophone = micSession.subscribe(state => { microphoneState = state; });
     exercise = new ExerciseSession(audio, micSession);
     const beforeUnload = (event: BeforeUnloadEvent) => {
       if (takePhase !== 'idle' || memoryTakes.length) { event.preventDefault(); event.returnValue = ''; }
@@ -1100,6 +1101,7 @@
     return () => {
       disposed = true;
       stopAuxiliary();
+      stopObservingMicrophone();
       window.removeEventListener('blur', stopAuxiliaryOnBlur);
       document.removeEventListener('visibilitychange', visibilityChanged);
       cancelLibraryAddition();
@@ -1206,7 +1208,7 @@
     <div class="header-actions">
       <RepositoryLink compact
       /><ThemeToggle compact
-      /><LanguagePicker
+      /><DisplayPreferences
       /><button
         class="icon-button account-button"
         aria-label={$t('Compte · {status}', {status: $t($syncState.status)})}

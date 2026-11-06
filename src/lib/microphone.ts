@@ -1,4 +1,4 @@
-import type { PitchInput } from './pitch';
+import type { PitchInput, MicrophoneState } from './pitch';
 
 export type MicrophoneOwner = 'studio' | 'take' | 'exercises';
 type Lease = { owner: MicrophoneOwner; ready: Promise<boolean> };
@@ -9,11 +9,12 @@ export class MicrophoneSession {
   constructor(private readonly input: PitchInput) {}
   get owner() { return this.lease?.owner ?? null; }
   get active() { return this.input.active; }
-  get starting() { return !!this.lease && !this.input.active; }
+  get starting() { return this.input.state === 'starting'; }
+  subscribe(listener: (state: MicrophoneState) => void) { return this.input.subscribeState(listener); }
   get context() { return this.input.contextClock; }
 
   acquire(owner: MicrophoneOwner, context: AudioContext | undefined, deviceId: string): Promise<boolean> {
-    if (this.lease) return this.lease.ready;
+    if (this.lease && this.input.state !== 'idle') return this.lease.ready;
     const started = this.input.start(context, deviceId);
     const lease: Lease = { owner, ready: started.then(() => this.lease === lease && this.input.active, error => {
       if (this.lease !== lease) return false;

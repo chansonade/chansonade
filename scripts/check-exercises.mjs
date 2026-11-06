@@ -16,10 +16,10 @@ const { EXERCISES, VOICE_RANGES, EXERCISE_PITCH_LIMITS, EXERCISE_TICKS_PER_BEAT:
   exerciseTonicBounds, normalizeExercisePreferences: normalize, stepExercise,
   createExercisePassage: passage, exerciseSecondsAt: secondsAt, exerciseMIDI: midi } = e;
 SpessaLog.setLogLevel(false, true, false);
-const defaults = { exerciseId: 'five-note', bpm: 80, step: 1, voice: null };
+const defaults = { exerciseId: 'five-note', bpm: 80, step: 1, cue: true, voice: null };
 assert.deepEqual(normalize(null), defaults);
 assert.throws(() => passage(defaults, 'listen'), /Choisissez une étendue/);
-assert.equal(EXERCISES.length, 7); assert.equal(VOICE_RANGES.length, 6);
+assert.equal(EXERCISES.length, 9); assert.equal(VOICE_RANGES.length, 6);
 assert.deepEqual(EXERCISE_PITCH_LIMITS, { low: 33, high: 93 });
 assert.deepEqual(VOICE_RANGES.map(({ low, high }) => [low, high]), [[60,84], [57,81], [53,76], [48,72], [43,67], [40,64]]);
 for (const invalid of [undefined, null, true, [], 'wrong', 42]) assert.deepEqual(normalize(invalid), defaults);
@@ -40,6 +40,24 @@ assert.equal(stepExercise(defaults, 1), null);
 
 const base = normalize({ voice: { low: 48, high: 72, tonic: 60 } });
 const five = passage(base, 'guide');
+assert.deepEqual(EXERCISES.slice(0, 3).map(exercise => exercise.id), ['three-note', 'four-note', 'five-note']);
+for (const [id, pitches, syllables] of [
+  ['three-note', [60,62,64,62,60], ['mi','me','ma','me','mi']],
+  ['four-note', [60,62,64,65,64,62,60], ['mi','me','ma','mo','ma','me','mi']],
+]) {
+  const plan = passage({ ...base, exerciseId: id, cue: false }, 'guide');
+  assert.deepEqual(plan.notes.map(note => note.midi), pitches);
+  assert.deepEqual(plan.notes.map(note => note.syllable), syllables);
+  assert.equal(plan.notes[0].startTick, 0);
+}
+assert.equal(normalize({ cue: false }).cue, false);
+for (const cue of [undefined, null, 'false', 0, true]) assert.equal(normalize({ cue }).cue, true);
+const withoutCue = passage({ ...base, cue: false }, 'guide');
+assert(!withoutCue.notes.some(note => note.role === 'cue'));
+assert.equal(withoutCue.notes[0].startTick, 0);
+assert.equal(withoutCue.durationTicks, five.durationTicks - 2 * ticks);
+assert.equal(BasicMIDI.fromArrayBuffer(midi(passage({ ...base, cue: false }, 'solo'))).tracks[0].events.filter(event => (event.statusByte & 0xf0) === 0x90).length, 0);
+
 assert.deepEqual(five.notes.filter(n => n.role === 'voice').map(n => n.midi), [60,62,64,65,67,65,64,62,60]);
 assert.deepEqual(five.notes.filter(n => n.role === 'voice').map(n => n.syllable), ['mi','me','ma','mo','mu','mo','ma','me','mi']);
 assert.deepEqual(five.notes.filter(n => n.role === 'cue').map(n => [n.midi, n.startTick, n.endTick]), [[48,0,ticks], [52,0,ticks], [55,0,ticks]]);
@@ -72,8 +90,8 @@ for (const exercise of EXERCISES) {
       for (const forbidden of [bounds.low - 1, bounds.high + 1]) assert.throws(() => passage({ ...config, voice: { ...range, tonic: forbidden } }, 'guide'), /dépasse votre étendue/);
     }
   }
-  for (const bpm of [40, 83, 160]) {
-    const config = { ...base, exerciseId: exercise.id, bpm };
+  for (const bpm of [40, 83, 160]) for (const cue of [true, false]) {
+    const config = { ...base, exerciseId: exercise.id, bpm, cue };
     const guide = passage(config, 'guide'), listen = passage(config, 'listen'), solo = passage(config, 'solo');
     assert.deepEqual(listen.notes, guide.notes); assert.deepEqual(solo.notes, guide.notes);
     assert.deepEqual(midi(listen), midi(guide));
@@ -104,7 +122,7 @@ const staccato = passage({ ...base, exerciseId: 'staccato' }, 'guide');
 assert.equal(staccato.notes[3].endTick - staccato.notes[3].startTick, ticks * 0.35);
 const held = passage({ ...base, exerciseId: 'sustained' }, 'solo');
 assert.equal(held.notes[3].endTick - held.notes[3].startTick, 8 * ticks);
-console.log(`PASS exercises: seven motifs, six editable extents, complete range bounds, chromatic steps, snapshots and ${sequences} MIDI parses with matching clocks and silent solo windows`);
+console.log(`PASS exercises: nine motifs, six editable extents, complete range bounds, chromatic steps, snapshots and ${sequences} MIDI parses with matching clocks and silent solo windows`);
 
 const browser = await chromium.connectOverCDP(process.env.CHANSONADE_TEST_CDP);
 const context = await browser.newContext({ serviceWorkers: 'block' });
@@ -120,7 +138,7 @@ try {
     const check = (condition, message) => { if (!condition) throw Error(message); };
     const key = scope => `chansonade.exercises.${scope}`;
     const a = 'user:exercise-a', b = 'user:exercise-b';
-    const guest = { exerciseId: 'arpeggio', bpm: 83, step: 2, voice: { low: 48, high: 72, tonic: 55 } };
+    const guest = { exerciseId: 'arpeggio', bpm: 83, step: 2, cue: false, voice: { low: 48, high: 72, tonic: 55 } };
     const own = { ...guest, bpm: 120 };
     check(read(a).voice === null && read(a).bpm === 80, 'No voice assumed at first use');
     localStorage.setItem('chansonade.language', 'de');
@@ -149,10 +167,11 @@ try {
     write('anonymous', guest);
     const { setLanguage, translate } = await import('/src/lib/i18n.ts');
     const { componentMessages } = await import('/src/lib/messages-components.ts');
+    const { appMessages } = await import('/src/lib/messages-app.ts');
     const errorKeys = ['Réglages d’exercice invalides.', 'Choisissez une étendue vocale pour commencer.', 'Ce motif dépasse votre étendue vocale.'];
     for (const language of ['en', 'de', 'nl']) {
       setLanguage(language);
-      for (const { nameKey } of [...EXERCISES, ...VOICE_RANGES]) check(Object.hasOwn(componentMessages[language], nameKey), `${language}: missing label ${nameKey}`);
+      for (const { nameKey } of [...EXERCISES, ...VOICE_RANGES]) check(Object.hasOwn(componentMessages[language], nameKey) || Object.hasOwn(appMessages[language], nameKey), `${language}: missing label ${nameKey}`);
       for (const key of errorKeys) check(translate(key) !== key, `${language}: missing exercise error`);
     }
     check(localStorage.getItem('chansonade.practice.synthetic') === 'untouched', 'Exercise settings do not touch score practice');
@@ -172,8 +191,37 @@ try {
     Object.defineProperty(window, 'localStorage', ownStorage);
     check(read(a).bpm === 120, 'Getter refusal has no persistence side effects');
   });
+  await page.evaluate(async () => {
+    const { initializeLanguage, setLanguage, setNoteNotation, noteName, noteFormatter } = await import('/src/lib/i18n.ts');
+    const check = (condition, message) => { if (!condition) throw Error(message); };
+    localStorage.setItem('chansonade.note-notation', 'invalid');
+    initializeLanguage();
+    setLanguage('de');
+    check(noteName(59) === 'H3', 'Invalid notation defaults to language, including German H');
+    setNoteNotation('english'); check(noteName(59) === 'B3', 'Forced English always uses B');
+    setNoteNotation('solfege'); check(noteName(59) === 'Si3', 'Forced solfege is independent of language');
+    let displayed;
+    const unsubscribe = noteFormatter.subscribe(format => { displayed = format(60); });
+    check(displayed === 'Do4', 'One reactive formatter serves every note display');
+    setNoteNotation('english'); check(displayed === 'C4', 'Notation changes notify consumers');
+    localStorage.setItem('chansonade.note-notation', 'solfege');
+    window.dispatchEvent(new StorageEvent('storage', { key: 'chansonade.note-notation' }));
+    check(displayed === 'Do4', 'Other tabs update the formatter');
+    const get = Storage.prototype.getItem, set = Storage.prototype.setItem;
+    Storage.prototype.getItem = () => { throw new DOMException('Synthetic refused read', 'SecurityError'); };
+    window.dispatchEvent(new StorageEvent('storage', { key: 'chansonade.note-notation' }));
+    check(displayed === 'C4', 'Refused notation read falls back to language');
+    Storage.prototype.getItem = get;
+    Storage.prototype.setItem = () => { throw new DOMException('Synthetic refused write', 'QuotaExceededError'); };
+    setNoteNotation('solfege'); check(displayed === 'Do4', 'Refused persistence still updates the current view');
+    Storage.prototype.setItem = set;
+    unsubscribe(); setNoteNotation('english');
+  });
   await page.reload();
   assert.equal(await page.evaluate(async () => (await import('/src/lib/exercises.ts')).readExercisePreferences('user:exercise-a').bpm), 120, 'Preferences survive a real page reload');
+  assert.equal(await page.evaluate(async () => {
+    const i = await import('/src/lib/i18n.ts'); i.initializeLanguage(); return i.noteName(59);
+  }), 'B3', 'Device notation survives reload independently of account preferences');
   assert.deepEqual(errors, []);
   console.log('PASS exercise preferences: scoped persistence/reload, explicit anonymous adoption, malformed values, denied getter/read/write, existing-entry protection and translated metadata');
 
@@ -278,6 +326,7 @@ try {
     <script type="module">
       import { AudioPlayer } from '/src/lib/audio.ts';
       import { PitchInput } from '/src/lib/pitch.ts';
+      import { Score } from '/src/lib/score.ts';
       import { ExerciseSession } from '/src/lib/exercise-session.ts';
       import { scoreId, writeSettings, readSettings } from '/src/lib/storage.ts';
       const id = await scoreId(${JSON.stringify(fixtureXML)});
@@ -285,13 +334,15 @@ try {
         rate: .8, loopEnabled: true, loopA: 1.5, loopB: 9, target: 0,
         parts: [{channel: 0, program: 73, volume: 35, transpose: 2, muted: false, solo: true}]
       }, 'anonymous');
-      window.__exerciseStarts = [];
+      window.__exerciseStarts = []; window.__scoreLoads = 0; window.__layouts = 0;
+      const layout = Score.prototype.layout;
+      Score.prototype.layout = function (...args) { window.__layouts++; return layout.apply(this, args); };
       window.__inputs = new Set();
       const inputStart = PitchInput.prototype.start, sessionStart = ExerciseSession.prototype.start;
       PitchInput.prototype.start = function (...args) { window.__inputs.add(this); window.__exerciseInput = this; return inputStart.apply(this, args); };
       ExerciseSession.prototype.start = function (...args) { window.__exerciseSession = this; return sessionStart.apply(this, args); };
       const load = AudioPlayer.prototype.load, start = AudioPlayer.prototype.startExercise;
-      AudioPlayer.prototype.load = function (...args) { window.__exerciseAudio = this; return load.apply(this, args); };
+      AudioPlayer.prototype.load = function (...args) { window.__exerciseAudio = this; window.__scoreLoads++; return load.apply(this, args); };
       AudioPlayer.prototype.startExercise = function (passage) {
         window.__exerciseStarts.push({ mode: passage.mode, tonic: passage.tonic, bpm: passage.bpm });
         return start.call(this, passage);
@@ -631,11 +682,140 @@ try {
   assert.deepEqual(errors, [], 'No unhandled exercise microphone errors');
   console.log('PASS exercise microphone: real sine pitches/octave/silence/full trace, separate frontier, late decoded frames/key changes, solo, reuse/borrow/cleanup, permission cancellation/refusal, blur, accounts and one PitchInput');
 
+  // No cue means no reserved beat: the same frozen calendar drives notes and capture.
+  await exercisePage.setViewportSize({ width: 1280, height: 900 });
+  await exercisePage.evaluate(async () => (await import('/src/lib/theme.ts')).themePreference.set('light'));
+  await panel.getByLabel('Accord de départ', { exact: true }).uncheck();
+  assert.equal(await panel.locator('.cue-band').count(), 0, 'No invisible/zero-width chord remains in the plot');
+  await panel.getByText('Sans accord, le motif commence immédiatement. En mode Seul, aucun son n’est joué.', { exact: true }).waitFor();
+  await setSignal(220);
+  await panel.getByRole('button', { name: 'Avec guide', exact: true }).click(); await waitPlaying();
+  await exercisePage.waitForFunction(() => window.__exerciseSession.confirmed.some(point => point.time > .2 && point.expectedMidi === 57));
+  const noCue = await exercisePage.evaluate(() => {
+    const s = window.__exerciseSession, run = s.run;
+    return { passage: s.state.passage, error: s.confirmed.filter(p => p.expectedMidi !== null).map(p => p.time - (p.captureTime + run.offset - run.latencyMs / 1000 - run.origin.startedAt)),
+      origin: run.origin.startedAt, opens: window.__micOpens, starts: window.__exerciseStarts.length, loads: window.__scoreLoads, layouts: window.__layouts };
+  });
+  assert(noCue.passage.notes.every(note => note.role === 'voice') && noCue.passage.notes[0].startTick === 0);
+  assert(noCue.error.every(error => Math.abs(error) < 1e-9), 'Microphone uses the immediate, frozen playback origin');
+
+  // Use the actual display settings while real exercise sound and capture continue.
+  const display = exercisePage.locator('.display-preferences');
+  await display.locator('summary').click();
+  await display.getByLabel('Notation des notes', { exact: true }).selectOption('english');
+  assert.equal(await panel.getByLabel('Tonique de départ').locator('option:checked').innerText(), 'A3');
+  assert((await panel.locator('.pitch-axis-label').allTextContents()).includes('A3'), 'Expected tonic is labelled in the chosen notation');
+  await exercisePage.waitForFunction(() => document.querySelector('.exercise-voice strong')?.textContent === 'A3');
+  assert.deepEqual(await exercisePage.evaluate(() => ({ origin: window.__exerciseSession.state.startedAt, opens: window.__micOpens, starts: window.__exerciseStarts.length, loads: window.__scoreLoads, layouts: window.__layouts })),
+    { origin: noCue.origin, opens: noCue.opens, starts: noCue.starts, loads: noCue.loads, layouts: noCue.layouts }, 'Notation does not restart audio, microphone or engraving');
+  await display.getByLabel('Notation des notes', { exact: true }).selectOption('solfege');
+  assert.equal(await panel.getByLabel('Tonique de départ').locator('option:checked').innerText(), 'La3');
+  await display.getByLabel('Notation des notes', { exact: true }).selectOption('english');
+  await display.locator('summary').click();
+  await panel.getByRole('button', { name: 'Seul', exact: true }).click(); await waitPlaying();
+  await panel.getByRole('status').filter({ hasText: 'Chantez sans référence sonore.' }).waitFor();
+  await exercisePage.waitForFunction(() => window.__exerciseSession.confirmed.some(point => point.time > .25 && Math.abs(point.frequency - 220) < 3));
+  assert.equal(await exercisePage.evaluate(() => window.__exerciseSession.state.passage.mode), 'solo');
+  await panel.getByRole('button', { name: 'Stop', exact: true }).click();
+  await panel.locator('.exercise-scroll').evaluate(node => { node.scrollTop = 0; });
+  if (screenshotDir) await exercisePage.screenshot({ path: `${screenshotDir}/exercises-no-cue-english-desktop.png` });
+
+  // Both full and compact keyboards share the formatter, including accessible keys.
+  await exercisePage.getByRole('button', { name: 'Piano', exact: true }).click();
+  const fullKeyboard = exercisePage.locator('.piano-keyboard:not(.compact)');
+  assert.equal(await fullKeyboard.locator('[data-piano-midi="59"]').getAttribute('aria-label'), 'B3, MIDI 59');
+  await exercisePage.evaluate(async () => (await import('/src/lib/i18n.ts')).setNoteNotation('solfege'));
+  assert.equal(await fullKeyboard.locator('[data-piano-midi="59"]').getAttribute('aria-label'), 'Si3, MIDI 59');
+  await exercisePage.getByRole('button', { name: 'Partition', exact: true }).click();
+  await exercisePage.getByTitle('Clavier de référence', { exact: true }).click();
+  assert.equal(await exercisePage.locator('.piano-keyboard.compact [data-piano-midi="60"]').getAttribute('aria-label'), 'Do4, MIDI 60');
+  await exercisePage.evaluate(async () => (await import('/src/lib/i18n.ts')).setNoteNotation('english'));
+  assert.equal(await exercisePage.locator('.piano-keyboard.compact [data-piano-midi="60"]').getAttribute('aria-label'), 'C4, MIDI 60');
+  await exercisePage.getByRole('button', { name: 'Écouter ma voix', exact: true }).click();
+  await exercisePage.waitForFunction(() => document.querySelector('.mic-button strong')?.textContent === 'A3');
+  await exercisePage.evaluate(async () => (await import('/src/lib/i18n.ts')).setNoteNotation('solfege'));
+  await exercisePage.waitForFunction(() => document.querySelector('.mic-button strong')?.textContent === 'La3');
+  await exercisePage.getByRole('button', { name: 'Arrêter le microphone', exact: true }).click();
+  await exercisePage.evaluate(async () => (await import('/src/lib/i18n.ts')).setNoteNotation('english'));
+  await chooseExercises();
+  await exercisePage.evaluate(async a => (await import('/src/lib/sync.ts')).login(a.email, 'synthetic'), accountB);
+  assert(await panel.getByLabel('Accord de départ', { exact: true }).isChecked(), 'Cue preference belongs to the account');
+  await exercisePage.evaluate(async a => (await import('/src/lib/sync.ts')).login(a.email, 'synthetic'), accountA);
+  assert(!(await panel.getByLabel('Accord de départ', { exact: true }).isChecked()));
+  await exercisePage.reload(); await studioReady(); await chooseExercises();
+  assert(!(await panel.getByLabel('Accord de départ', { exact: true }).isChecked()), 'No-cue preference survives reload');
+  assert.equal(await panel.getByLabel('Tonique de départ').locator('option:checked').innerText(), 'A3', 'Device notation survives reload/account changes');
+  for (const [width, height, language, cueLabel, displayLabel, notationLabel] of [
+    [390,844,'en','Opening chord','Display preferences','Note notation'],
+    [844,390,'de','Anfangsakkord','Anzeigeeinstellungen','Notennamen'],
+    [390,844,'nl','Beginakkoord','Weergavevoorkeuren','Notennotatie'],
+  ]) {
+    await exercisePage.setViewportSize({ width, height });
+    await exercisePage.evaluate(async language => (await import('/src/lib/i18n.ts')).setLanguage(language), language);
+    assert(!(await panel.getByLabel(cueLabel, { exact: true }).isChecked()));
+    const box = await panel.boundingBox();
+    assert(box.x >= 0 && box.y >= 0 && box.x + box.width <= width + 1 && box.y + box.height <= height + 1);
+    assert.equal(await display.locator('summary').getAttribute('aria-label'), displayLabel);
+    await display.locator('summary').click();
+    const notation = display.getByLabel(notationLabel, { exact: true });
+    const rect = await notation.boundingBox();
+    assert(rect.height >= 44 && rect.x >= 0 && rect.x + rect.width <= width + 1, 'Display preferences fit narrow screens');
+    await display.locator('summary').click();
+  }
+  await exercisePage.setViewportSize({ width: 1280, height: 900 });
+  await exercisePage.evaluate(async () => (await import('/src/lib/i18n.ts')).setLanguage('fr'));
+  console.log('PASS exercise options: immediate cue-less calendar/capture, silent solo traced, scoped cue/reload, live global notation in exercises, both keyboards and microphone without audio/engraving restart');
+
+  // Physical microphone notifications must render even when animation is suspended.
+  await exercisePage.evaluate(() => {
+    const raf = window.requestAnimationFrame, held = [];
+    window.requestAnimationFrame = callback => { held.push(callback); return -1; };
+    window.__resumeAnimation = () => { window.requestAnimationFrame = raf; held.forEach(callback => raf(callback)); };
+    window.__holdMic = true;
+  });
+  await exercisePage.waitForTimeout(70);
+  const clickExercise = text => exercisePage.evaluate(text => [...document.querySelectorAll('.exercise-actions button')].find(button => button.textContent.trim() === text).click(), text);
+  await clickExercise('Avec guide');
+  await exercisePage.waitForFunction(() => !!window.__releaseMic && document.querySelector('.mic-button').disabled, null, { polling: 20 });
+  await exercisePage.evaluate(() => { window.__holdMic = false; window.__releaseMic(); });
+  await exercisePage.waitForFunction(() => document.querySelector('.exercise-voice .active') && document.querySelector('.mic-button.active') && !document.querySelector('.mic-button').disabled, null, { polling: 20 });
+  await exercisePage.evaluate(() => window.__exerciseInput.capture.onprocessorerror(new Event('processorerror')));
+  await exercisePage.waitForFunction(() => !document.querySelector('.exercise-voice .active') && !document.querySelector('.mic-button.active') && !document.querySelector('.mic-button').disabled, null, { polling: 20 });
+  await clickExercise('Avec guide');
+  await exercisePage.waitForFunction(() => document.querySelector('.exercise-voice .active') && document.querySelector('.mic-button.active'), null, { polling: 20 });
+  await clickExercise('Stop');
+  await exercisePage.evaluate(() => { window.__denyMic = true; });
+  await clickExercise('Avec guide');
+  await exercisePage.waitForFunction(() => document.querySelector('.exercise-status')?.textContent.includes('Synthetic microphone permission denied') && !document.querySelector('.mic-button').disabled, null, { polling: 20 });
+  await exercisePage.evaluate(() => { window.__denyMic = false; window.__resumeAnimation(); });
+  console.log('PASS observable microphone: pending permission, active, interruption/reopening and refused permission update both views without animation polling');
+
+  // Axis spacing follows the complete absolute range, even for a very distant error.
+  await page.evaluate(async () => {
+    const { mount, unmount } = await import('/node_modules/.vite/deps/svelte.js');
+    const { default: Plot } = await import('/src/lib/ExercisePlot.svelte');
+    const { createExercisePassage } = await import('/src/lib/exercises.ts');
+    for (const width of [240, 900]) for (const [tonic, observed] of [[57,57], [56,57], [57,69], [33,93], [93,33]]) {
+      const target = document.createElement('div'); target.style.width = `${width}px`; document.body.append(target);
+      const component = mount(Plot, { target, props: {
+        preview: createExercisePassage({ exerciseId: 'sustained', bpm: 80, step: 1, cue: false, voice: { low: 33, high: 93, tonic } }, 'guide'),
+        playback: { phase: 'idle' }, pending: [],
+        confirmed: [{ time: .5, captureTime: .5, frequency: 440 * 2 ** ((observed - 69) / 12), midi: observed }],
+      } });
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const boxes = [...target.querySelectorAll('.pitch-axis-label')].map(node => node.getBoundingClientRect()).sort((a,b) => a.top - b.top);
+      if (!boxes.length || boxes.some((box, i) => i && box.top < boxes[i - 1].bottom + 1)) throw Error(`Overlapping axis labels: width=${width}, tonic=${tonic}, measured=${observed}`);
+      await unmount(component); target.remove();
+    }
+  });
+  assert.deepEqual(errors, [], 'No unhandled option or microphone state errors');
+  console.log('PASS pitch axis labels: sustained/adjacent notes, octave errors and full detector range at narrow and wide plot widths');
+
   // Cached identity is not a confirmed connection. Adoption updates an already open view.
   const cached = await browser.newContext({ serviceWorkers: 'block' }); contexts.push(cached);
   await cached.addInitScript(syntheticMicrophone);
   cached.on('page', page => page.on('pageerror', error => errors.push(error.message)));
-  const guest = { exerciseId: 'arpeggio', bpm: 83, step: 2, voice: { low: 48, high: 72, tonic: 55 } };
+  const guest = { exerciseId: 'arpeggio', bpm: 83, step: 2, cue: false, voice: { low: 48, high: 72, tonic: 55 } };
   await cached.addInitScript(({ account, guest }) => {
     if (location.origin === 'null') return;
     localStorage.setItem('chansonade.account', JSON.stringify(account));

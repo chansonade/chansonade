@@ -94,12 +94,12 @@ try {
   await page.locator('.transport .play-button').click();
   await page.waitForFunction(() => Number(document.querySelector('.timeline-row input').value) > 0.15);
   const before = await progress(page);
-  await page.locator('.language-picker summary').click();
-  await page.locator('.language-picker').getByRole('button', { name: 'English', exact: true }).click();
+  await page.locator('.display-preferences summary').click();
+  await page.locator('.display-preferences').getByRole('button', { name: 'English', exact: true }).click();
   assert.equal(await page.locator('html').getAttribute('lang'), 'en');
   assert.match(await page.locator('.score-facts').innerText(), /bars/);
-  await page.locator('.language-picker summary').click();
-  await page.locator('.language-picker').getByRole('button', { name: 'Français', exact: true }).click();
+  await page.locator('.display-preferences summary').click();
+  await page.locator('.display-preferences').getByRole('button', { name: 'Français', exact: true }).click();
   await page.getByTitle('Ruban horizontal fluide', { exact: true }).click();
   await page.locator('.score-viewport.horizontal').waitFor();
   await page.locator('.auto-mode').click();
@@ -539,8 +539,8 @@ try {
     assert.equal(await preferencePage.locator('html').getAttribute('lang'), fallbackValues ? 'fr' : 'de');
     assert.equal(await preferencePage.locator('html').getAttribute('data-theme'), fallbackValues ? 'dark' : 'light');
     // Bring every scenario to French using a real preference control.
-    await preferencePage.locator('.language-picker summary').click();
-    await preferencePage.locator('.language-picker').getByRole('button', { name: 'Français', exact: true }).click();
+    await preferencePage.locator('.display-preferences summary').click();
+    await preferencePage.locator('.display-preferences').getByRole('button', { name: 'Français', exact: true }).click();
     await preferencePage.locator('.mic-button').click();
     await preferencePage.waitForFunction(() => document.querySelector('.mic-button.active') && !document.querySelector('.mic-button:disabled'));
     await preferencePage.locator('.atelier-button').click();
@@ -552,16 +552,20 @@ try {
     await preferencePage.locator('.mixer-panel').getByRole('button', { name: 'Fermer les instruments', exact: true }).click();
     await preferencePage.locator('.play-button').click();
     await preferencePage.waitForFunction(() => document.querySelector('.play-button.is-playing'));
-    await preferencePage.locator('.language-picker summary').click();
-    await preferencePage.locator('.language-picker').getByRole('button', { name: 'English', exact: true }).click();
+    await preferencePage.locator('.display-preferences summary').click();
+    await preferencePage.locator('.display-preferences').getByRole('button', { name: 'English', exact: true }).click();
+    await preferencePage.locator('.display-preferences summary').click();
+    await preferencePage.getByLabel('Note notation', { exact: true }).selectOption('english');
+    await preferencePage.getByLabel('Note notation', { exact: true }).selectOption('solfege');
+    await preferencePage.locator('.display-preferences summary').click();
     const previousTheme = await preferencePage.locator('html').getAttribute('data-theme');
     await preferencePage.locator('.theme-toggle').click();
     assert.equal(await preferencePage.locator('html').getAttribute('lang'), 'en');
     assert.notEqual(await preferencePage.locator('html').getAttribute('data-theme'), previousTheme);
-    assert(await preferencePage.locator('.play-button.is-playing').count(), 'Language and theme remain usable without restarting playback');
-    assert.equal(await preferencePage.evaluate(() => window.__microphoneRequests.length), 2, 'Language and theme do not restart the microphone');
-    await preferencePage.locator('.language-picker summary').click();
-    await preferencePage.locator('.language-picker').getByRole('button', { name: 'Français', exact: true }).click();
+    assert(await preferencePage.locator('.play-button.is-playing').count(), 'Language, notation and theme remain usable without restarting playback');
+    assert.equal(await preferencePage.evaluate(() => window.__microphoneRequests.length), 2, 'Language, notation and theme do not restart the microphone');
+    await preferencePage.locator('.display-preferences summary').click();
+    await preferencePage.locator('.display-preferences').getByRole('button', { name: 'Français', exact: true }).click();
     await preferencePage.locator('.play-button').click();
     await preferencePage.getByRole('button', { name: 'Enregistrer un essai', exact: true }).click();
     await preferencePage.locator('.take-button.recording').waitFor();
@@ -2158,8 +2162,8 @@ try {
   ]) {
     await dragPanel.locator('.section-heading button').click();
     await dragPage.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
-    await dragPage.locator('.language-picker summary').click();
-    await dragPage.locator('.language-picker').getByRole('button', { name: language, exact: true }).click();
+    await dragPage.locator('.display-preferences summary').click();
+    await dragPage.locator('.display-preferences').getByRole('button', { name: language, exact: true }).click();
     await dragPage.locator('.library-toggle').click();
     assert.equal(await sourceHandle.getAttribute('aria-label'), label);
     assert.match(await dragTree.locator('#score-drag-help').innerText(), new RegExp(instruction));
