@@ -35,6 +35,7 @@ try {
     'check-audio-transport.mjs',
     'check-take-playback.mjs',
     'check-organization.mjs',
+    'check-exercises.mjs',
     'check-distribution.mjs',
   ];
   if (process.argv.includes('--browser')) checks.push('check-browser.mjs');

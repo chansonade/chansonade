@@ -20,6 +20,7 @@ micro. Le serveur de comptes et de synchronisation est facultatif et indépendan
 | `lib/storage.ts`, `lib/sync.ts`, `lib/take-sync.ts` | Persistance locale, file de mutations et synchronisation automatique par compte. `AccountPanel.svelte` présente la connexion et son état. |
 | `lib/theme.ts`, `lib/ThemeToggle.svelte` | Préférence système/clair/sombre et application de `data-theme` au document. |
 | `lib/catalog.ts`, `public/scores/catalog.json` | Catalogue public éditorialisé, identités de contenu, dossiers par répertoire/langue et provenance par édition. |
+| `lib/exercises.ts` | Motifs déclaratifs, étendues vocales, calendrier et MIDI d’exercice, préférences locales par compte. |
 | `lib/organization.ts` | Projection pure des dossiers imbriqués, chemins, destinations et classement actif/corbeille des partitions et essais. |
 | `lib/LibraryTree.svelte`, `lib/MoveItem.svelte`, `lib/LibraryDialog.svelte` | Arborescence personnelle, corbeille, déplacements et confirmations accessibles. |
 
@@ -39,6 +40,48 @@ en paysage. Un choix manuel prend priorité. Changer de vue, de taille ou de th�
 doit préserver le transport et les réglages. La transposition concerne l'audio et
 la hauteur attendue ; elle ne modifie pas les notes gravées. Le piano manuel garde
 sa hauteur réelle et son propre instrument sur le même AudioContext.
+
+## Modèle des exercices
+
+`exercises.ts` fournit le domaine de la future vue dédiée, sans connexion à
+l'interface ni au lecteur à cette étape. Les sept motifs majeurs décrivent leurs
+degrés, durées en pulsations, syllabes (paroles non traduites) et articulation.
+Un accord de tonique à l'octave inférieure dure une pulsation, suivi d'une
+pulsation de silence. Les tessitures proposées sont indicatives et éditables ;
+leurs bornes réelles sont l'unique valeur conservée, sans catégorie de voix doublée.
+Les étendues personnalisées restent dans les fréquences déjà prises en charge par
+le détecteur, dont les paramètres ne changent pas. Aucun profil n'est présumé au
+premier usage : `voice: null` demande un choix avant de produire un passage.
+
+Le pas manuel est chromatique (1 demi-ton par défaut, 2 au choix), le tempo propre
+aux exercices vaut 80 BPM par défaut, réglable de 40 à 160. Les bornes de tonique
+sont calculées sur toutes les notes chantées du motif, indépendamment de l'accord
+d'accompagnement. Une étendue trop étroite est conservée pour être corrigée,
+mais ne permet pas de lecture. Un déplacement hors bornes renvoie `null`, sans
+bouclage ni correction silencieuse ; la compilation refuse une tonique incorrecte.
+
+`createExercisePassage` produit un instantané indépendant des préférences : notes
+MIDI absolues, syllabes, rôles accord/voix et offsets en ticks (480 par pulsation).
+Ce calendrier est commun au futur son et au dessin. `exerciseSecondsAt` utilise
+le même tempo entier en microsecondes que `exerciseMIDI`, y compris aux BPM non
+exactement représentables. Le MIDI SMF type 0 est généré uniquement en mémoire,
+avec piano sur les canaux 0 (accord) et 1 (guide), des note-off explicites et la
+fin du passage après son dernier créneau. Un All Notes Off terminal conserve
+cette durée pour Spessa, qui ignore la fin de piste seule pour calculer sa durée. Écouter et Avec guide ont le même son ;
+Seul garde seulement l'accord mais conserve toutes les notes attendues et la même
+durée silencieuse. Aucun MusicXML, ressource de bibliothèque, prise ou protocole
+serveur n'est ajouté.
+
+Les fonctions de préférences prennent toujours un scope explicite, sous
+`chansonade.exercises.<scope>`, et utilisent `preferences.ts`. Lecture et écriture
+normalisent les valeurs et tolèrent un stockage indisponible. La reprise anonyme
+est une opération explicite à appeler à la confirmation d'une connexion lors de
+l'intégration de la vue : elle copie uniquement les préférences anonymes vers un
+compte sans entrée, jamais depuis un autre compte. Même une entrée de compte
+endommagée est conservée. Si la lecture du compte est refusée, aucune écriture de
+reprise n'est tentée. La copie ne supprime pas les préférences anonymes, afin de
+les conserver quand la persistance est facultative. Il n'y a aucun abonnement ou
+accès au stockage à l'import du module, ni modification de la synchronisation.
 
 ## De l'entrée micro à la courbe
 
