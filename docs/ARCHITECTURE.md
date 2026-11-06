@@ -51,8 +51,11 @@ points confirmés et une fin provisoire remplaçable, affichée en pointillés. 
 les points confirmés entrent dans les données sauvegardées ; l'arrêt d'une prise
 vide la fin du décodeur avant de figer ses métadonnées.
 
-`CaptureTimeline` convertit les horodatages du micro en temps musical en tenant
-compte des pauses, changements de vitesse et sauts. `projection.ts` place alors
+`CaptureTimeline` conserve le transport, la voix cible et sa transposition sur
+l’horloge du micro. Les observations provisoires et confirmées retrouvent ce
+contexte au même instant, compensé du décalage micro, même si les réglages ont
+changé avant leur réception. Les changements musicaux sont horodatés dès l’action ;
+le transport des prises reprend ces mêmes instantanés. `projection.ts` place alors
 les mesures sur la géométrie des portées ; zoom et rotation changent la projection,
 pas les observations acoustiques. La note attendue sert à calculer l'écart de
 justesse, jamais à corriger la détection ou à placer verticalement la voix.

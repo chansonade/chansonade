@@ -197,6 +197,106 @@ try {
   assert.deepEqual(isolation, { accountA: 0, accountB: 1, anonymous: 1 });
   console.log('PASS browser: scoped IndexedDB and account deletion reject stale writes without touching other scopes');
 
+  // Delay only delivery of real synthetic detector output, including its flush.
+  const musicalContext = await isolatedContext();
+  await musicalContext.route('**/api/v1/**', route => route.fulfill({ json: { user: null, registration: 'open' } }));
+  await musicalContext.addInitScript(() => {
+    const NativeWorker = window.Worker;
+    const onmessage = Object.getOwnPropertyDescriptor(NativeWorker.prototype, 'onmessage');
+    window.__pitchQueue = []; window.__holdPitch = false; window.__releasedAtFlush = false;
+    window.Worker = new Proxy(NativeWorker, { construct(target, args) {
+      const worker = new target(...args);
+      if (String(args[0]).includes('pitch-worker')) Object.defineProperty(worker, 'onmessage', { set(listener) {
+        if (!listener) { onmessage.set.call(worker, null); return; }
+        const deliver = event => listener.call(worker, event);
+        window.__releasePitch = () => {
+          const queued = window.__pitchQueue; window.__pitchQueue = [];
+          for (const event of queued) deliver(event);
+        };
+        onmessage.set.call(worker, event => {
+          if (event.data.type === 'pitch' && window.__holdPitch) { window.__pitchQueue.push(event); return; }
+          if (event.data.type === 'flushed' && window.__holdPitch) {
+            window.__releasedAtFlush = true; window.__holdPitch = false; window.__releasePitch();
+          }
+          deliver(event);
+        });
+      } });
+      return worker;
+    } });
+  });
+  const musicalPage = await musicalContext.newPage(); await musicalPage.goto(url); await ready(musicalPage);
+  const voicesXML = `<?xml version="1.0"?><score-partwise version="4.0"><work><work-title>Synthetic musical context</work-title></work><part-list>${[1, 2].map(index => `<score-part id="P${index}"><part-name>Voice ${index}</part-name><score-instrument id="I${index}"><instrument-name>Piano</instrument-name></score-instrument><midi-instrument id="I${index}"><midi-channel>${index}</midi-channel><midi-program>1</midi-program></midi-instrument></score-part>`).join('')}</part-list>${['C', 'E'].map((step, index) => `<part id="P${index + 1}">${Array.from({ length: 8 }, (_, bar) => `<measure number="${bar + 1}">${bar ? '' : '<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes><direction><sound tempo="60"/></direction>'}<note><pitch><step>${step}</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note></measure>`).join('')}</part>`).join('')}</score-partwise>`;
+  await musicalPage.locator('input[type="file"]').setInputFiles({ name: 'musical-context.musicxml', mimeType: 'application/xml', buffer: Buffer.from(voicesXML) });
+  await musicalPage.waitForFunction(() => document.querySelector('h1')?.textContent === 'Synthetic musical context'); await ready(musicalPage);
+  await musicalPage.getByRole('button', { name: 'Voix & instruments', exact: true }).click();
+  const channels = await musicalPage.locator('#voice-target option').evaluateAll(options => options.map(option => Number(option.value)));
+  assert.equal(channels.length, 2);
+  await musicalPage.locator('.mixer-panel').getByRole('button', { name: 'Fermer les instruments', exact: true }).click();
+  await musicalPage.getByRole('button', { name: 'Enregistrer un essai', exact: true }).click();
+  await musicalPage.waitForFunction(() => document.querySelector('.take-button.recording') && document.querySelector('.play-button.is-playing'));
+  await musicalPage.getByRole('button', { name: 'Voix & instruments', exact: true }).click();
+  await musicalPage.evaluate(() => { window.__holdPitch = true; });
+  const queuedProbes = async () => {
+    await musicalPage.waitForFunction(() => window.__pitchQueue.flatMap(event => event.data.confirmed).length >= 20);
+    return musicalPage.evaluate(() => ({
+      confirmed: window.__pitchQueue.flatMap(event => event.data.confirmed).slice(-3),
+      pending: window.__pitchQueue.at(-1).data.pending.at(-1),
+    }));
+  };
+  const beforeVoice = await queuedProbes();
+  // These changes share one browser turn: no animation frame can fill gaps.
+  await musicalPage.evaluate(channel => {
+    const select = document.querySelector('#voice-target'); select.value = String(channel); select.dispatchEvent(new Event('change', { bubbles: true }));
+    const up = document.querySelectorAll('.instrument-card')[1].querySelector('.transpose-control button:last-child');
+    up.click(); up.click();
+    window.__releasePitch();
+  }, channels[1]);
+  const beforeTranspose = await queuedProbes();
+  assert(beforeTranspose.pending.frequency > 0);
+  await musicalPage.evaluate(() => {
+    document.querySelectorAll('.instrument-card')[1].querySelector('.transpose-control button:last-child').click();
+    window.__releasePitch();
+  });
+  const expectedCents = Math.round((69 + 12 * Math.log2(beforeTranspose.pending.frequency / 440) - 64 - 2) * 100);
+  assert.equal(await musicalPage.locator('.mic-button small').innerText(), `${expectedCents > 0 ? '+' : ''}${expectedCents} cents`, 'Delayed provisional pitch uses the transpose at capture, not the latest control value');
+  const beforeFlush = await queuedProbes();
+  const lastWindow = await musicalPage.evaluate(() => {
+    const time = window.__pitchQueue.at(-1).data.pending.at(-1).time;
+    document.querySelectorAll('.instrument-card')[1].querySelector('.transpose-control button:last-child').click();
+    return time;
+  });
+  // Keep the last change inside captured audio, not beyond the final WAV frame.
+  await musicalPage.waitForFunction(time => window.__pitchQueue.at(-1).data.pending.at(-1)?.time > time + .1, lastWindow);
+  await musicalPage.evaluate(() => document.querySelector('.take-button.recording').click());
+  await musicalPage.waitForFunction(() => {
+    const button = document.querySelector('.take-button');
+    return button && !button.disabled && !button.classList.contains('recording');
+  });
+  const musicalTake = await musicalPage.evaluate(async () => {
+    const s = await import('/src/lib/storage.ts');
+    const scope = s.storageScope(), [summary] = await s.listTakes(scope);
+    const take = summary ? await s.getTake(summary.id, scope) : null;
+    if (!take) throw Error(`Synthetic take unavailable in ${scope}`);
+    const { takePitchSamples, takeMoment } = await import('/src/lib/take-playback.ts');
+    return { ...take, audio: { size: take.audio.size }, replay: takePitchSamples(take, { parts: [{ channel: take.settings.target, staves: [99] }] }), moments: take.transport.map(point => takeMoment(take, point.time)), releasedAtFlush: window.__releasedAtFlush };
+  });
+  assert(musicalTake.analysisComplete); assert(musicalTake.audio.size > 44); assert(musicalTake.releasedAtFlush);
+  for (const [probes, channel, staff, transpose, expectedPitch] of [
+    [beforeVoice.confirmed, channels[0], 1, 0, 60],
+    [beforeTranspose.confirmed, channels[1], 2, 2, 66],
+    [beforeFlush.confirmed, channels[1], 2, 3, 67],
+  ]) for (const probe of probes) {
+    const point = musicalTake.pitches.find(point => Math.abs(point.time - (probe.time - musicalTake.captureStartedAt)) < 1e-9);
+    assert(point, 'A delayed confirmation is retained, including at capture flush');
+    assert.equal(point.targetChannel, channel); assert.equal(point.staff, staff); assert.equal(point.transpose, transpose); assert.equal(point.expectedPitch, expectedPitch); assert(point.noteId);
+    for (const field of ['frequency', 'rawFrequency', 'clarity', 'rms', 'midi', 'cents']) assert.equal(point[field], probe[field], `Acoustic ${field} must be unchanged`);
+    const replay = musicalTake.replay.find(sample => sample.captureTime === point.time);
+    assert.equal(replay.targetChannel, channel); assert.equal(replay.staff, staff); assert.equal(replay.transpose, transpose); assert.equal(replay.frequency, probe.frequency);
+  }
+  for (const transpose of [0, 1, 2, 3, 4]) assert(musicalTake.transport.some(point => point.targetChannel === channels[1] && point.transpose === transpose), `Immediate target/transpose ${transpose} boundary must be saved`);
+  assert(musicalTake.moments.some(point => point.targetChannel === channels[1] && point.transpose === 4));
+  console.log('PASS browser: delayed provisional/confirmed/flush pitch retains captured target, staff, transpose and expected note; acoustic fields and replay remain unchanged; WAV saved; musical boundaries are recorded between animation frames');
+
   // Failed authentication must release its suspension and resume the same account.
   const authAccount = { id: 'ci-auth-resume', email: 'auth-resume@example.invalid' };
   const authContext = await isolatedContext(authAccount);

@@ -1,6 +1,6 @@
-export type TransportMoment = { captureTime: number; scoreTime: number; rate: number; playing: boolean; epoch: number };
+export type TransportMoment = { captureTime: number; scoreTime: number; rate: number; playing: boolean; targetChannel: number; transpose: number; epoch: number };
 
-/** Piecewise audio transport, expressed in the microphone's own clock. */
+/** Transport and musical context, expressed in the microphone's own clock. */
 export class CaptureTimeline {
   private segments: TransportMoment[] = [];
   private revision = 0;
@@ -10,18 +10,21 @@ export class CaptureTimeline {
 
   reset() { this.segments = []; this.last = null; this.revision++; }
 
-  observe(captureTime: number, scoreTime: number, rate: number, playing: boolean, discontinuity = false) {
+  observe(moment: Omit<TransportMoment, 'epoch'>, discontinuity = false): boolean {
+    const { captureTime, scoreTime, rate, playing } = moment;
     if (this.last && captureTime < this.last.captureTime) this.reset();
     const previous = this.last;
     const predicted = previous ? previous.scoreTime + (previous.playing ? (captureTime - previous.captureTime) * previous.rate : 0) : scoreTime;
     const jumped = !!previous && Math.abs(scoreTime - predicted) > 0.08;
     if (discontinuity || jumped) this.revision++;
-    const value = { captureTime, scoreTime, rate, playing, epoch: this.revision };
-    if (!previous || discontinuity || jumped || previous.playing !== playing || previous.rate !== rate) this.segments.push(value);
+    const value = { ...moment, epoch: this.revision };
+    const boundary = !previous || discontinuity || jumped || previous.playing !== playing || previous.rate !== rate || previous.targetChannel !== moment.targetChannel || previous.transpose !== moment.transpose;
+    if (boundary) this.segments.push(value);
     // Fixed-lag observations need only recent transport boundaries. Keep the
     // last boundary before that horizon, even during a long uninterrupted note.
     while (this.segments.length > 1 && this.segments[1].captureTime < captureTime - 3) this.segments.shift();
     this.last = value;
+    return boundary;
   }
 
   at(captureTime: number): TransportMoment | null {

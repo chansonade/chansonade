@@ -143,7 +143,6 @@
   let takeRequest = 0;
   let takeStop: Promise<void> | null = null;
   let takeOpenedMic = false;
-  let lastTakeTransport = 0;
   let selection = $state<NotePosition | null>(null);
   let loopBoxes = $state<{ x: number; y: number; width: number; height: number }[]>([]);
   const programs = [{ value: 0, name: 'Piano' }, { value: 42, name: 'Violoncelle' }, { value: 48, name: 'Cordes' }, { value: 52, name: 'Chœur' }, { value: 53, name: 'Voix' }, { value: 73, name: 'Flûte' }];
@@ -541,14 +540,9 @@
     pianoFrame = music ? frameAt(music.frames, time) : undefined;
     playing = replayTake ? !!replayAudio && !replayAudio.paused && !replayAudio.ended : audio.playing;
     if (replayTake && now - lastUI > 30) replayPosition = replayTime;
-    if (pitch?.active) captureTimeline.observe(pitch.currentTime, time, rate, playing, looped);
+    if (pitch?.active) observeTransport({ scoreTime: time, playing, discontinuity: looped });
     if (!replayTake && (looped || time < previousTime - 0.08)) clearPitchTrace();
-    if (takeCapture && (looped || now - lastTakeTransport >= 100)) {
-      takeSeconds = Math.max(0, pitch.currentTime - takeCapture.startedAt);
-      addTakeMetadata('transport', { time: takeSeconds, scoreTime: time, playing, rate, targetChannel, transpose: parts.find((p) => p.channel === targetChannel)?.transpose || 0 });
-      lastTakeTransport = now;
-      if (!countIn && audio.ended) void finishTake();
-    }
+    if (takeCapture && !countIn && audio.ended) void finishTake();
     if (!layoutBusy && !busy) updateVisual(time, dt, looped || Math.abs(time - previousTime) > 0.6);
     if (now - lastUI > 90) { position = time; lastUI = now; }
     previousTime = time;
@@ -571,7 +565,7 @@
     if (replayTake) stopReplay();
     const backwards = time < position - 0.001;
     audio.seek(time);
-    observeTransport(true);
+    observeTransport({ discontinuity: true });
     position = time;
     previousTime = time;
     if (backwards) clearPitchTrace();
@@ -597,7 +591,13 @@
       audio.setTranspose(part.channel, part.transpose);
       audio.setProgram(part.channel, part.program);
     }
+    observeTransport();
     if (save) scheduleSave();
+  }
+  function setTargetChannel(channel: number) {
+    targetChannel = channel;
+    observeTransport();
+    clearPitchTrace(); scheduleSave();
   }
   function syncLoop(save = true) {
     audio.setLoop(loopEnabled ? loopA : null, loopEnabled ? loopB : null);
@@ -712,9 +712,18 @@
     if (kind === 'pitch') capture.pitches.push(point as TakePitch);
     else capture.transport.push(point as TakeTransport);
   }
-  function observeTransport(discontinuity = false) {
-    if (pitch?.active) captureTimeline.observe(pitch.currentTime, audio.time, rate, audio.playing, discontinuity);
-    if (takeCapture) addTakeMetadata('transport', { time: Math.max(0, pitch.currentTime - takeCapture.startedAt), scoreTime: audio.time, playing: audio.playing, rate, targetChannel, transpose: targetPart?.transpose || 0 });
+  function observeTransport({ scoreTime = audio.time, playing = audio.playing, discontinuity = false }: { scoreTime?: number; playing?: boolean; discontinuity?: boolean } = {}) {
+    if (!pitch?.active && !takeCapture) return;
+    const moment = { captureTime: pitch.currentTime, scoreTime, playing, rate, targetChannel, transpose: parts.find(part => part.channel === targetChannel)?.transpose || 0 };
+    const boundary = pitch.active && captureTimeline.observe(moment, discontinuity);
+    if (!takeCapture) return;
+    const time = Math.max(0, moment.captureTime - takeCapture.startedAt);
+    const previous = takeCapture.transport.at(-1);
+    if (!pitch.active || boundary || !previous || time - previous.time >= 0.1) {
+      takeSeconds = time;
+      const { captureTime: _captureTime, ...transport } = moment;
+      addTakeMetadata('transport', { time, ...transport });
+    }
   }
   function clearPitchTrace() {
     pitchSamples = [];
@@ -723,13 +732,14 @@
   }
   function locatePitch(result: PitchResult) {
     // The estimator reports the captured window's time, not its arrival time.
-    // A seek, pause or tempo edit after capture must not move that observation.
+    // Later transport, target or transposition edits cannot alter its context.
     const moment = captureTimeline.at(result.time - latency / 1000);
     if (!moment || !music) return null;
     const frame = frameAt(music.frames, moment.scoreTime);
+    const { targetChannel, transpose } = moment;
     const note = moment.playing && geometry ? frame?.notes.map((id) => geometry!.notes.get(id)).find((n) => n?.channel === targetChannel) : undefined;
-    const transpose = parts.find((p) => p.channel === targetChannel)?.transpose || 0;
-    const sample: PitchSample = { captureTime: result.time, scoreTime: moment.scoreTime, frequency: result.frequency, targetChannel, staff: targetPart?.staves[0] || 0, transpose, playing: moment.playing, epoch: moment.epoch };
+    const staff = music.parts.find(part => part.channel === targetChannel)?.staves[0] || 0;
+    const sample: PitchSample = { captureTime: result.time, scoreTime: moment.scoreTime, frequency: result.frequency, targetChannel, staff, transpose, playing: moment.playing, epoch: moment.epoch };
     return { sample, note, transpose };
   }
   function displayPitch(result: PitchResult, context: ReturnType<typeof locatePitch>) {
@@ -745,7 +755,7 @@
     const { sample, note, transpose } = context;
     if (visibleSample(sample)) displayPitch(result, context);
     if (takeCapture && result.time >= takeCapture.startedAt) {
-      addTakeMetadata('pitch', { time: result.time - takeCapture.startedAt, frequency: result.frequency, rawFrequency: result.rawFrequency ?? result.frequency, clarity: result.clarity, rms: result.rms, midi: result.midi, cents: result.cents, scoreTime: sample.scoreTime, expectedPitch: note ? note.pitch + transpose : null, noteId: note?.id || null, targetChannel, playing: sample.playing, staff: sample.staff, transpose: sample.transpose, epoch: sample.epoch });
+      addTakeMetadata('pitch', { time: result.time - takeCapture.startedAt, frequency: result.frequency, rawFrequency: result.rawFrequency ?? result.frequency, clarity: result.clarity, rms: result.rms, midi: result.midi, cents: result.cents, scoreTime: sample.scoreTime, expectedPitch: note ? note.pitch + transpose : null, noteId: note?.id || null, targetChannel: sample.targetChannel, playing: sample.playing, staff: sample.staff, transpose: sample.transpose, epoch: sample.epoch });
     }
     if (visibleSample(sample)) pitchSamples.push(sample);
   }
@@ -1123,7 +1133,7 @@
     {#if mixerOpen}
       <button class="drawer-backdrop mixer-backdrop" aria-label={$t("Fermer les instruments")} onclick={() => mixerOpen = false}></button>
       <aside class="mixer-panel"><div class="section-heading"><span>{$t("Voix & instruments")}</span><button class="icon-button small" aria-label={$t("Fermer les instruments")} onclick={() => mixerOpen = false}><X size={18} /></button></div>
-        <label class="target-label" for="voice-target">{$t("VOIX À TRAVAILLER")}</label><select id="voice-target" bind:value={targetChannel} onchange={() => { clearPitchTrace(); scheduleSave(); }}>{#each parts as part}<option value={part.channel}>{part.name}</option>{/each}</select>
+        <label class="target-label" for="voice-target">{$t("VOIX À TRAVAILLER")}</label><select id="voice-target" value={targetChannel} onchange={(event) => setTargetChannel(+event.currentTarget.value)}>{#each parts as part}<option value={part.channel}>{part.name}</option>{/each}</select>
         <div class="instrument-list">{#each parts as part}<div class="instrument-card"><div class="instrument-name"><span class="instrument-icon">{#if part.channel === targetChannel}<Mic size={17} />{:else}<Piano size={17} />{/if}</span><strong>{part.name}</strong><button class="mute-button" class:active={part.muted} title={$t('Couper {name}', {name: part.name})} aria-label={$t('Couper {name}', {name: part.name})} aria-pressed={part.muted} onclick={() => { part.muted = !part.muted; applyMix(); }}>{#if part.muted}<VolumeX size={16} />{:else}<Volume2 size={16} />{/if}</button><button class="solo-button" class:active={part.solo} title={$t('Écouter seulement {name}', {name: part.name})} aria-label={$t('Solo {name}', {name: part.name})} aria-pressed={part.solo} onclick={() => { part.solo = !part.solo; applyMix(); }}>S</button></div><div class="volume-row"><input type="range" min="0" max="127" step="1" value={part.volume} aria-label={$t('Volume {name}', {name: part.name})} oninput={(event) => { part.volume = +event.currentTarget.value; applyMix(); }} /><span>{Math.round(part.volume / 100 * 100)}%</span></div><div class="instrument-details"><select aria-label={$t('Son de {name}', {name: part.name})} value={part.program} onchange={(event) => { part.program = +event.currentTarget.value; applyMix(); }}>{#if !programs.some((p) => p.value === part.program)}<option value={part.program}>{$t("Instrument d’origine")}</option>{/if}{#each programs as program}<option value={program.value}>{$t(program.name)}</option>{/each}</select><div class="transpose-control"><button aria-label={$t('Transposer {name} vers le bas', {name: part.name})} disabled={part.transpose <= -24} onclick={() => { part.transpose--; applyMix(); }}><Minus size={13} /></button><span title={$t("Transposition audio en demi-tons")}>{part.transpose > 0 ? '+' : ''}{part.transpose}</span><button aria-label={$t('Transposer {name} vers le haut', {name: part.name})} disabled={part.transpose >= 24} onclick={() => { part.transpose++; applyMix(); }}><Plus size={13} /></button></div></div></div>{/each}</div>
         <div class="micro-settings"><div class="section-heading"><span>{$t("RETOUR DE VOIX")}</span><Mic size={15} /></div><p>{$t("La courbe suit votre voix. Sa fin en pointillés réagit immédiatement puis devient pleine après confirmation. Utilisez un casque pour isoler votre voix.")}</p><label for="microphone">{$t("Entrée microphone")}</label><select id="microphone" bind:value={microphoneId} onchange={() => void changeMicrophone()} disabled={micBusy || takePhase !== 'idle'}><option value="">{$t("Par défaut du système")}</option>{#each microphones as device}<option value={device.deviceId}>{device.label || $t('Microphone {number}', {number: microphones.indexOf(device) + 1})}</option>{/each}</select>{#if micActive && microphoneLabel}<p class="microphone-source">{$t('Entrée active : {name}.', {name: microphoneLabel})}{#if /noise|cancel|rnnoise/i.test(microphoneLabel)} {$t("La réduction de bruit peut couper du chant. Essayez l’entrée physique pour comparer.")}{/if}</p>{/if}<label for="latency">{$t("Décalage micro")} <strong>{latency} ms</strong></label><input id="latency" type="range" min="-200" max="400" step="10" bind:value={latency} /><button class="text-button clear-trace" onclick={clearPitchTrace}>{$t("Effacer la courbe")}</button></div>
         <button class="export-button" disabled={!music} onclick={exportPractice}><Download size={15} /> {$t("Exporter le MusicXML original")}</button>
