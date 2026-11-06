@@ -1801,6 +1801,205 @@ try {
   }
   console.log('PASS organization UI: separate current/disclosure, create in place, empty folders, rename, keyboard moves, global search without expansion changes, subtree/item/take trash and restore, missing parents, counted permanent deletion/cancellation, persistence, accounts, 44px portrait/landscape and EN/DE/NL');
 
+  const dragContext = await isolatedContext(null, { hasTouch: true });
+  await dragContext.route('**/api/v1/**', route => route.fulfill({ json: { user: null, registration: 'open' } }));
+  await dragContext.route('**/scores/*', route => route.request().url().includes('catalog.json') ? route.continue() : route.fulfill({ contentType: 'application/xml', body: syntheticXML('Drag active document') }));
+  await dragContext.addInitScript(() => {
+    window.__dragPointers = [];
+    window.addEventListener('pointerdown', event => window.__dragPointers.push({ type: event.pointerType, trusted: event.isTrusted }), true);
+  });
+  const dragPage = await dragContext.newPage(); await dragPage.goto(url); await ready(dragPage);
+  const dragIds = await dragPage.evaluate(async xml => {
+    const s = await import('/src/lib/storage.ts');
+    const ids = { source: crypto.randomUUID(), branch: crypto.randomUUID(), nested: crypto.randomUUID(), gone: crypto.randomUUID(), trash: crypto.randomUUID() };
+    const folders = [
+      { id: ids.source, name: 'Drag source folder', added: 1 },
+      { id: ids.branch, name: 'Drag branch', added: 2 },
+      { id: ids.nested, name: 'Drag nested', added: 3, parentId: ids.branch },
+      { id: ids.gone, name: 'Drag removed', added: 4 },
+      { id: ids.trash, name: 'Trashed destination', added: 5, trashedAt: 1 },
+      ...Array.from({ length: 14 }, (_, i) => ({ id: crypto.randomUUID(), name: `Scroll folder ${i}`, added: 20 + i })),
+    ];
+    await s.applyRemoteChanges(s.storageScope(), folders.map((folder, index) => ({ kind: 'organization', id: `folder.${folder.id}`, revision: index + 1, deleted: false, data: { type: 'folder', name: folder.name, added: folder.added, parentId: folder.parentId ?? null, ...(folder.trashedAt ? { trashedAt: folder.trashedAt } : {}) } })), folders.length);
+    ids.score = await s.scoreId(xml);
+    await s.saveScore({ id: ids.score, title: 'Dragged score', composer: '', xml, added: 1 });
+    await s.moveItem('score', ids.score, ids.source);
+    const { Score } = await import('/src/lib/score.ts'); const load = Score.prototype.load;
+    window.__dragOpened = 0;
+    Score.prototype.load = function(...args) { window.__dragOpened++; return load.apply(this, args); };
+    return ids;
+  }, syntheticXML('Dragged score'));
+  const dragTree = dragPage.locator('.library-tree'), dragPanel = dragPage.locator('.library-panel');
+  const sourceHandle = dragTree.locator(`[data-score-drag="${dragIds.score}"]`);
+  const destinationRow = id => dragTree.locator(`[data-score-drop="${id}"]`);
+  const input = await dragContext.newCDPSession(dragPage);
+  async function openDragLibrary() {
+    if (!await dragPanel.count()) await dragPage.getByRole('button', { name: 'Bibliothèque', exact: true }).click();
+    await dragPage.getByRole('button', { name: 'Mes partitions', exact: true }).click();
+  }
+  async function resetDragSource() {
+    await dragPage.evaluate(async ids => (await import('/src/lib/storage.ts')).moveItem('score', ids.score, ids.source), dragIds);
+    await openDragLibrary();
+    const disclosure = destinationRow(dragIds.source).locator('.disclosure');
+    if (await disclosure.getAttribute('aria-expanded') === 'false') await disclosure.click();
+    await dragTree.locator(`[data-folder-id="${dragIds.source}"] [data-score-drag="${dragIds.score}"]`).waitFor();
+    await dragPanel.evaluate(panel => panel.scrollTop = 0);
+  }
+  const center = async locator => { const box = await locator.boundingBox(); assert(box); return { x: box.x + box.width / 2, y: box.y + box.height / 2 }; };
+  async function startPointer(kind) {
+    await sourceHandle.scrollIntoViewIfNeeded(); const point = await center(sourceHandle);
+    if (kind === 'mouse') { await dragPage.mouse.move(point.x, point.y); await dragPage.mouse.down(); }
+    else if (kind === 'pen') await input.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', buttons: 1, pointerType: 'pen' });
+    else await input.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ ...point, id: 1, radiusX: 6, radiusY: 6, force: 1 }] });
+    return point;
+  }
+  async function movePointer(kind, point) {
+    if (kind === 'mouse') await dragPage.mouse.move(point.x, point.y, { steps: 8 });
+    else if (kind === 'pen') await input.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point, button: 'left', buttons: 1, pointerType: 'pen' });
+    else await input.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ ...point, id: 1, radiusX: 6, radiusY: 6, force: 1 }] });
+  }
+  async function endPointer(kind, point) {
+    if (kind === 'mouse') await dragPage.mouse.up();
+    else if (kind === 'pen') await input.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', buttons: 0, pointerType: 'pen' });
+    else await input.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  }
+  async function assertPlacement(folderId) {
+    await dragPage.waitForFunction(async ({ id, folderId }) => (await (await import('/src/lib/storage.ts')).readOrganization()).classify('score', id).folderId === folderId, { id: dragIds.score, folderId });
+    assert.equal(await dragTree.locator('[data-score-dragging], .score-drag-preview, [data-score-drop-active]').count(), 0);
+  }
+  await resetDragSource();
+  let point = await startPointer('mouse');
+  await movePointer('mouse', { x: point.x + 3, y: point.y + 2 }); await endPointer('mouse', point);
+  await assertPlacement(dragIds.source);
+  assert.equal(await dragPage.evaluate(() => window.__dragOpened), 0, 'A short handle press never opens the score');
+  await startPointer('mouse');
+  point = await center(destinationRow(dragIds.branch)); await movePointer('mouse', point);
+  assert.equal(await destinationRow(dragIds.branch).locator('.disclosure').getAttribute('aria-expanded'), 'false', 'Hover does not expand immediately');
+  await destinationRow(dragIds.branch).locator('.disclosure[aria-expanded="true"]').waitFor();
+  point = await center(destinationRow(dragIds.nested)); await movePointer('mouse', point);
+  await destinationRow(dragIds.nested).locator('xpath=self::*[@data-score-drop-active]').waitFor();
+  await endPointer('mouse', point); await assertPlacement(dragIds.nested);
+  assert((await dragTree.locator('[role=status]').innerText()).includes('Dragged score'));
+  await startPointer('mouse'); point = await center(dragTree.locator('.root-select')); await movePointer('mouse', point); await endPointer('mouse', point); await assertPlacement(null);
+  await resetDragSource(); await startPointer('mouse');
+  const bounds = await dragPanel.boundingBox();
+  point = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height - 6 };
+  await movePointer('mouse', point);
+  await dragPage.waitForFunction(() => {
+    const panel = document.querySelector('.library-panel'), row = panel.querySelector('.unfiled-entry > .tree-row').getBoundingClientRect();
+    return panel.scrollTop > 100 && row.bottom < innerHeight - 3;
+  });
+  point = await center(dragTree.locator('.unfiled-entry > .tree-row')); await movePointer('mouse', point); await endPointer('mouse', point); await assertPlacement(null);
+  await startPointer('mouse'); await movePointer('mouse', { x: bounds.x + bounds.width / 2, y: bounds.y + 6 });
+  await dragPage.waitForFunction(() => document.querySelector('.library-panel').scrollTop < 5);
+  point = await center(dragTree.locator('.root-select')); await movePointer('mouse', point); await endPointer('mouse', point); await assertPlacement(null);
+  await resetDragSource(); await startPointer('mouse');
+  point = await center(destinationRow(dragIds.branch)); await movePointer('mouse', point); await dragPage.keyboard.press('Escape'); await endPointer('mouse', point); await assertPlacement(dragIds.source);
+  await resetDragSource(); await startPointer('mouse');
+  point = await center(destinationRow(dragIds.branch)); await movePointer('mouse', point);
+  await dragPanel.getByRole('button', { name: 'Fermer la bibliothèque', exact: true }).focus(); await dragPage.keyboard.press('Enter');
+  await dragPanel.waitFor({ state: 'detached' }); await endPointer('mouse', point); await openDragLibrary(); await assertPlacement(dragIds.source);
+  await resetDragSource(); await startPointer('mouse');
+  await movePointer('mouse', { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height - 6 });
+  await dragPage.waitForFunction(() => document.querySelector('.library-tree .trash-select').getBoundingClientRect().bottom < innerHeight - 3);
+  point = await center(dragTree.locator('.trash-select')); await movePointer('mouse', point);
+  assert.equal(await dragTree.locator('[data-score-drop-active]').count(), 0);
+  await endPointer('mouse', point); await assertPlacement(dragIds.source);
+  assert.notEqual(await dragTree.locator('.trash-select').getAttribute('aria-current'), 'location', 'Release does not activate the trash entry');
+  assert.equal(await dragTree.locator(`[data-score-drop="${dragIds.trash}"]`).count(), 0);
+  await resetDragSource(); await startPointer('mouse');
+  point = await center(destinationRow(dragIds.gone)); await movePointer('mouse', point);
+  const peer = await dragContext.newPage();
+  await peer.route('**/synthetic-drag-peer', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Synthetic peer</title>' }));
+  await peer.goto(`${url}/synthetic-drag-peer`);
+  await peer.evaluate(async id => {
+    const s = await import('/src/lib/storage.ts');
+    await s.applyRemoteChanges(s.storageScope(), [{ kind: 'organization', id: `folder.${id}`, revision: 100, deleted: true, data: null }], 100);
+  }, dragIds.gone);
+  await peer.close();
+  await endPointer('mouse', point); await assertPlacement(dragIds.source);
+  await dragPage.waitForFunction(() => document.querySelector('.library-tree [role=status]').textContent.includes('Dossier introuvable.'));
+  await resetDragSource(); await startPointer('pen');
+  point = await center(destinationRow(dragIds.branch)); await movePointer('pen', point); await endPointer('pen', point); await assertPlacement(dragIds.branch);
+  await resetDragSource(); await startPointer('touch');
+  point = await center(destinationRow(dragIds.nested)); await movePointer('touch', point); await endPointer('touch', point); await assertPlacement(dragIds.nested);
+  await startPointer('touch'); point = await center(dragTree.locator('.root-select')); await movePointer('touch', point); await endPointer('touch', point); await assertPlacement(null);
+  await resetDragSource(); await startPointer('touch');
+  point = await center(destinationRow(dragIds.nested)); await movePointer('touch', point);
+  await input.send('Input.dispatchTouchEvent', { type: 'touchCancel', touchPoints: [] }); await assertPlacement(dragIds.source);
+  assert.equal(await dragPage.evaluate(() => window.__dragOpened), 0, 'Mouse, pen and cancellation never open a score');
+  for (const [width, height] of [[350, 760], [740, 350]]) {
+    await dragPage.setViewportSize({ width, height }); await dragPanel.waitFor({ state: 'detached' });
+    await resetDragSource(); await startPointer('touch');
+    const panel = await dragPanel.boundingBox(); point = { x: panel.x + panel.width / 2, y: panel.y + panel.height - 6 };
+    await movePointer('touch', point);
+    await dragPage.waitForFunction(() => { const panel = document.querySelector('.library-panel'), row = panel.querySelector('.unfiled-entry > .tree-row').getBoundingClientRect(); return panel.scrollTop > 100 && row.bottom < innerHeight - 3; });
+    point = await center(dragTree.locator('.unfiled-entry > .tree-row')); await movePointer('touch', point); await endPointer('touch', point); await assertPlacement(null);
+    await resetDragSource();
+    const file = dragTree.locator(`[data-kind="score"][data-id="${dragIds.score}"] .file-open`); await file.scrollIntoViewIfNeeded();
+    const start = await center(file), before = await dragPanel.evaluate(panel => panel.scrollTop);
+    await input.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ ...start, id: 1 }] });
+    await input.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: start.x, y: Math.max(5, start.y - 100), id: 1 }] });
+    await input.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await dragPage.waitForFunction(before => document.querySelector('.library-panel').scrollTop > before, before);
+    assert.equal(await dragTree.locator('[data-score-dragging]').count(), 0, 'The score body retains native touch scrolling');
+  }
+  await dragPage.setViewportSize({ width: 1150, height: 850 }); await resetDragSource(); await startPointer('mouse');
+  point = await center(destinationRow(dragIds.branch)); await movePointer('mouse', point);
+  const record = dragPage.getByRole('button', { name: 'Enregistrer un essai', exact: true }); await record.focus(); await record.press('Enter');
+  await dragPage.getByRole('button', { name: 'Arrêter l’essai', exact: true }).waitFor();
+  await endPointer('mouse', point); await assertPlacement(dragIds.source);
+  assert(await sourceHandle.isDisabled());
+  const disabledStart = await center(sourceHandle); await dragPage.mouse.move(disabledStart.x, disabledStart.y); await dragPage.mouse.down(); await movePointer('mouse', point); await dragPage.mouse.up(); await assertPlacement(dragIds.source);
+  await dragPage.getByRole('button', { name: 'Arrêter l’essai', exact: true }).focus(); await dragPage.keyboard.press('Enter');
+  await record.waitFor(); await sourceHandle.waitFor(); await dragPage.waitForFunction(() => !document.querySelector('[data-score-drag]')?.disabled);
+  await resetDragSource(); await startPointer('mouse'); point = await center(destinationRow(dragIds.branch)); await movePointer('mouse', point);
+  await dragPage.evaluate(async () => (await import('/src/lib/storage.ts')).setStorageScope('user:drag-other'));
+  await endPointer('mouse', point);
+  await dragPage.waitForFunction(() => !document.querySelector('[data-score-dragging], .score-drag-preview, [data-score-drop-active]'));
+  assert.equal(await dragPage.evaluate(async ids => (await (await import('/src/lib/storage.ts')).readOrganization('anonymous')).classify('score', ids.score).folderId, dragIds), dragIds.source);
+  assert.equal(await dragPage.evaluate(async () => (await (await import('/src/lib/storage.ts')).syncQueue('user:drag-other')).length), 0);
+  await dragPage.evaluate(async () => (await import('/src/lib/storage.ts')).setStorageScope('anonymous')); await ready(dragPage); await resetDragSource();
+  // The handle gives keyboard users the existing move dialogue, not a second keyboard drag policy.
+  await sourceHandle.focus(); await dragPage.keyboard.press('Enter');
+  await dragTree.getByRole('button', { name: 'Déplacer « Dragged score » vers…', exact: true }).press('Enter');
+  await dragPage.getByRole('dialog').waitFor(); await dragPage.keyboard.press('Escape');
+  await dragPage.getByRole('dialog').waitFor({ state: 'detached' });
+  for (const [theme, language, label, cancelled, moved, instruction] of [
+    ['light', 'English', 'Drag “Dragged score” to a folder', 'Move cancelled.', 'Score “Dragged score” moved to “Drag branch”.', 'Drag the handle to a folder'],
+    ['dark', 'Deutsch', '„Dragged score“ in einen Ordner ziehen', 'Verschieben abgebrochen.', 'Partitur „Dragged score“ nach „Drag branch“ verschoben.', 'Ziehe den Griff in einen Ordner'],
+    ['light', 'Nederlands', '‘Dragged score’ naar een map slepen', 'Verplaatsing geannuleerd.', 'Partituur ‘Dragged score’ verplaatst naar ‘Drag branch’.', 'Sleep de greep naar een map'],
+  ]) {
+    await dragPanel.locator('.section-heading button').click();
+    await dragPage.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
+    await dragPage.locator('.language-picker summary').click();
+    await dragPage.locator('.language-picker').getByRole('button', { name: language, exact: true }).click();
+    await dragPage.locator('.library-toggle').click();
+    assert.equal(await sourceHandle.getAttribute('aria-label'), label);
+    assert.match(await dragTree.locator('#score-drag-help').innerText(), new RegExp(instruction));
+    await startPointer('mouse'); point = await center(destinationRow(dragIds.branch)); await movePointer('mouse', point);
+    const colors = await destinationRow(dragIds.branch).evaluate(row => {
+      const style = getComputedStyle(row), preview = getComputedStyle(document.querySelector('.score-drag-preview'));
+      return { outline: style.outlineWidth, background: style.backgroundColor, panel: getComputedStyle(row.closest('.library-panel')).backgroundColor, preview: preview.backgroundColor, ink: preview.color };
+    });
+    assert.equal(colors.outline, '2px'); assert.notEqual(colors.background, colors.panel); assert.notEqual(colors.preview, colors.ink);
+    await dragPage.keyboard.press('Escape'); await endPointer('mouse', point); await assertPlacement(dragIds.source);
+    assert.equal(await dragTree.locator('[role=status]').innerText(), cancelled);
+    await startPointer('mouse'); await movePointer('mouse', point); await endPointer('mouse', point); await assertPlacement(dragIds.branch);
+    await dragPage.waitForFunction(text => document.querySelector('.library-tree [role=status]').textContent === text, moved);
+    await dragPage.evaluate(async ids => (await import('/src/lib/storage.ts')).moveItem('score', ids.score, ids.source), dragIds);
+    await dragTree.locator(`[data-folder-id="${dragIds.source}"] [data-score-drag="${dragIds.score}"]`).waitFor();
+  }
+  const openedBefore = await dragPage.evaluate(() => window.__dragOpened);
+  await dragTree.locator(`[data-kind="score"][data-id="${dragIds.score}"] .file-open`).click();
+  await dragPage.waitForFunction(() => document.querySelector('h1')?.textContent === 'Dragged score');
+  assert.equal(await dragPage.evaluate(() => window.__dragOpened), openedBefore + 1, 'The rest of the score row still opens the score');
+  const pointers = await dragPage.evaluate(() => window.__dragPointers);
+  assert(pointers.every(event => event.trusted));
+  assert.deepEqual([...new Set(pointers.map(event => event.type))].sort(), ['mouse', 'pen', 'touch']);
+  await input.detach();
+  console.log('PASS score drag: trusted mouse/pen/touch, threshold, nested/root/unfiled drops, hover expansion and edge scroll, forbidden trash, Escape/cancel/unmount/account/recording cancellation, transactional removed destination and no release opening');
+
   assert.deepEqual(errors, [], 'No unhandled browser errors');
 } finally {
   for (const context of contexts.reverse()) await context.close();

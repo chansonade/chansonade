@@ -1,6 +1,11 @@
 // French source text is the stable key. Musical titles, lyrics and user data
 // remain unchanged; named placeholders are interpolated by the i18n runtime.
 const messages: readonly [string, string, string, string][] = [
+  ["Glisser « {title} » vers un dossier", "Drag “{title}” to a folder", "„{title}“ in einen Ordner ziehen", "‘{title}’ naar een map slepen"],
+  ["Glissez la poignée vers un dossier, ou utilisez « Déplacer vers… » dans les actions.", "Drag the handle to a folder, or choose “Move to…” in the actions.", "Ziehe den Griff in einen Ordner oder wähle „Verschieben nach…“ in den Aktionen.", "Sleep de greep naar een map of kies ‘Verplaatsen naar…’ bij de acties."],
+  ["Glissez « {title} » vers un dossier.", "Drag “{title}” to a folder.", "Ziehe „{title}“ in einen Ordner.", "Sleep ‘{title}’ naar een map."],
+  ["Déplacement annulé.", "Move cancelled.", "Verschieben abgebrochen.", "Verplaatsing geannuleerd."],
+  ["Partition « {title} » déplacée vers « {folder} ».", "Score “{title}” moved to “{folder}”.", "Partitur „{title}“ nach „{folder}“ verschoben.", "Partituur ‘{title}’ verplaatst naar ‘{folder}’."],
   ["Déplacer « {title} » vers…", "Move “{title}” to…", "„{title}“ verschieben nach…", "‘{title}’ verplaatsen naar…"],
   ["Déplacer vers…", "Move to…", "Verschieben nach…", "Verplaatsen naar…"],
   ["Dossier de destination", "Destination folder", "Zielordner", "Doelmap"],
