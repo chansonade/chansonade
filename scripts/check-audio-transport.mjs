@@ -1,25 +1,45 @@
-// Requires an isolated Vite server and a headless Chromium CDP endpoint.
+// Run through check-client.mjs, or supply an isolated Vite URL and Chromium CDP.
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 const browser = await chromium.connectOverCDP(process.env.CHANSONADE_TEST_CDP || 'http://127.0.0.1:9228');
-const context = await browser.newContext();
+const context = await browser.newContext({ serviceWorkers: 'block' });
 const page = await context.newPage();
+const errors = [];
+page.on('pageerror', error => errors.push(error.message));
 try {
-  await page.goto(process.env.CHANSONADE_TEST_URL || 'http://127.0.0.1:5194');
+  const url = `${process.env.CHANSONADE_TEST_URL || 'http://127.0.0.1:5194'}/check-audio-transport`;
+  await context.route(url, route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Audio transport regression</title><button id="check-audio-start">Start synthetic audio</button>' }));
+  await page.goto(url);
   await page.evaluate(async () => {
     const { AudioPlayer } = await import('/src/lib/audio.ts');
     const { Score } = await import('/src/lib/score.ts');
     const engine = new Score();
-    const score = await engine.load(await (await fetch('/scores/une-souris-verte-chant-piano.musicxml')).text(), 'vertical', 900, 1);
-    engine.destroy();
+    // Two 2/4 bars at 78 bpm place G4 at 3.077 s in Verovio's rounded timemap.
+    // Sustained half notes also exercise held notes after a normal pause/resume.
+    const xml = `<score-partwise version="4.0">
+      <part-list><score-part id="P1">
+        <part-name>Synthetic</part-name>
+        <midi-instrument id="I1"><midi-channel>1</midi-channel><midi-program>1</midi-program></midi-instrument>
+      </score-part></part-list>
+      <part id="P1">${Array.from({ length: 8 }, (_, i) => `
+        <measure number="${i + 1}">
+          ${i ? '' : `<attributes>
+            <divisions>1</divisions><time><beats>2</beats><beat-type>4</beat-type></time>
+            <clef><sign>G</sign><line>2</line></clef>
+          </attributes><direction><sound tempo="78"/></direction>`}
+          <note><pitch><step>${['C', 'D', 'G', 'A'][i % 4]}</step><octave>4</octave></pitch>
+            <duration>2</duration><type>half</type></note>
+        </measure>`).join('')}
+      </part>
+    </score-partwise>`;
+    let score;
+    try { score = await engine.load(xml, 'vertical', 900, 1); }
+    finally { engine.destroy(); }
     const audio = new AudioPlayer();
-    await audio.load(score.musical.midi);
-    const button = document.createElement('button');
-    button.id = 'check-audio-start'; button.textContent = 'Test audio';
-    button.style.cssText = 'position:fixed;top:0;left:0;z-index:9999999';
-    document.body.append(button);
+    const button = document.querySelector('#check-audio-start');
     button.onclick = () => {
       window.__audioCheck = (async () => {
+        await audio.load(score.musical.midi);
         const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
         const snapshots = [];
         await audio.context.resume();
@@ -62,8 +82,9 @@ try {
       })().finally(() => audio.destroy());
     };
   });
-  await page.locator('#check-audio-start').click({ force: true });
+  await page.locator('#check-audio-start').click();
   const result = await page.evaluate(() => window.__audioCheck);
+  assert.deepEqual(errors, [], 'No unhandled audio transport errors');
   console.log(JSON.stringify(result));
   assert(result.snapshots.every(point => point.time === 3.077 && !point.playing), 'paused seek must remain exactly fixed');
   assert(Math.abs(result.resumed - 3.077) < .02, 'play must resume at requested seek');

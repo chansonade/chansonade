@@ -4,25 +4,38 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
 
+async function availablePort() {
+  const probe = createPortProbe();
+  await new Promise((resolve, reject) => { probe.once('error', reject); probe.listen(0, '127.0.0.1', resolve); });
+  const port = probe.address().port;
+  await new Promise(resolve => probe.close(resolve));
+  return port;
+}
+
 const root = fileURLToPath(new URL('../', import.meta.url));
 let server, browser;
 try {
   let url = process.env.CHANSONADE_TEST_URL;
   if (!url) {
-    server = await createServer({ root, base: '/', server: { host: '127.0.0.1', port: 0, strictPort: false, open: false } });
+    server = await createServer({ root, base: '/', server: { host: '127.0.0.1', port: await availablePort(), strictPort: true, open: false } });
     await server.listen();
     url = `http://127.0.0.1:${server.httpServer.address().port}`;
   }
   let cdp = process.env.CHANSONADE_TEST_CDP;
   if (!cdp) {
-    const probe = createPortProbe();
-    await new Promise((resolve, reject) => { probe.once('error', reject); probe.listen(0, '127.0.0.1', resolve); });
-    const port = probe.address().port;
-    await new Promise(resolve => probe.close(resolve));
+    const port = await availablePort();
     browser = await chromium.launch({ headless: true, args: [`--remote-debugging-port=${port}`, '--autoplay-policy=no-user-gesture-required'] });
     cdp = `http://127.0.0.1:${port}`;
   }
-  const checks = ['check-score-import.mjs', 'check-recording-limits.mjs', 'check-loop-ranges.mjs', 'check-take-playback.mjs', 'check-distribution.mjs'];
+  const checks = [
+    'check-score-import.mjs',
+    'check-recording-limits.mjs',
+    'check-loop-ranges.mjs',
+    'check-loop-geometry.mjs',
+    'check-audio-transport.mjs',
+    'check-take-playback.mjs',
+    'check-distribution.mjs',
+  ];
   if (process.argv.includes('--browser')) checks.push('check-browser.mjs');
   for (const check of checks) {
     console.log(`\n${check}`);

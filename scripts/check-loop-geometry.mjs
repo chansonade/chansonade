@@ -1,16 +1,16 @@
-// Run against an isolated Vite server and a headless Chrome CDP endpoint:
-// CHANSONADE_TEST_URL=http://127.0.0.1:5194 CHANSONADE_TEST_CDP=http://127.0.0.1:9228 node scripts/check-loop-geometry.mjs
+// Run through check-client.mjs, or supply an isolated Vite URL and Chromium CDP.
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 
 const browser = await chromium.connectOverCDP(process.env.CHANSONADE_TEST_CDP || 'http://127.0.0.1:9228');
-const context = await browser.newContext({ viewport: { width: 1000, height: 800 } });
+const context = await browser.newContext({ viewport: { width: 1000, height: 800 }, serviceWorkers: 'block' });
 const page = await context.newPage();
 const errors = [];
 page.on('pageerror', (error) => errors.push(error.message));
 try {
-  await page.goto(process.env.CHANSONADE_TEST_URL || 'http://127.0.0.1:5194');
-  await page.waitForFunction(() => document.querySelector('.play-button') && !document.querySelector('.play-button').disabled);
+  const url = `${process.env.CHANSONADE_TEST_URL || 'http://127.0.0.1:5194'}/check-loop-geometry`;
+  await context.route(url, route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Loop geometry regression</title><link rel="stylesheet" href="/src/style.css">' }));
+  await page.goto(url);
   const checks = await page.evaluate(async () => {
     const { Score, indexGeometry } = await import('/src/lib/score.ts');
     const { measuresInLoop } = await import('/src/lib/loop.ts');
@@ -22,7 +22,24 @@ try {
     const check = (condition, message) => { if (!condition) throw new Error(message); };
     const ids = (measures) => measures.map((measure) => measure.id).join(',');
     try {
-      const xml = await (await fetch('/scores/une-souris-verte-chant-piano.musicxml')).text();
+      // Enough quarter notes to create natural line breaks at both vertical widths.
+      const xml = `<score-partwise version="4.0">
+        <part-list><score-part id="P1">
+          <part-name>Synthetic</part-name>
+          <midi-instrument id="I1"><midi-channel>1</midi-channel><midi-program>1</midi-program></midi-instrument>
+        </score-part></part-list>
+        <part id="P1">${Array.from({ length: 17 }, (_, i) => `
+          <measure number="${i + 1}">
+            ${i ? '' : `<attributes>
+              <divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time>
+              <clef><sign>G</sign><line>2</line></clef>
+            </attributes><direction><sound tempo="78"/></direction>`}
+            ${['G', 'A', 'B', 'C'].map(step => `
+              <note><pitch><step>${step}</step><octave>4</octave></pitch>
+                <duration>1</duration><type>quarter</type></note>`).join('')}
+          </measure>`).join('')}
+        </part>
+      </score-partwise>`;
       let music;
       const results = [];
       for (const [mode, width, scale] of [['vertical', 350, 1], ['vertical', 900, 1], ['horizontal', 740, .6]]) {
@@ -62,7 +79,7 @@ try {
     } finally { host.remove(); engine.destroy(); }
   });
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify(checks));
+  console.log(`Loop geometry: ${JSON.stringify(checks)}`);
 } finally {
   await context.close();
   await browser.close();
