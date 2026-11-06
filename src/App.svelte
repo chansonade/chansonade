@@ -5,6 +5,9 @@
   import { AudioPlayer } from './lib/audio';
   import PianoKeyboard from './lib/PianoKeyboard.svelte';
   import ExerciseView from './lib/ExerciseView.svelte';
+  import { ExerciseSession } from './lib/exercise-session';
+  import { MicrophoneSession } from './lib/microphone';
+  import type { ExercisePassage } from './lib/exercises';
   import AccountPanel from './lib/AccountPanel.svelte';
   import ThemeToggle from './lib/ThemeToggle.svelte';
   import RepositoryLink from './lib/RepositoryLink.svelte';
@@ -31,6 +34,8 @@
   let engine: Score;
   const audio = new AudioPlayer();
   let pitch: PitchInput;
+  let micSession: MicrophoneSession;
+  let exercise = $state.raw<ExerciseSession | null>(null);
   let viewport: HTMLDivElement;
   let content: HTMLDivElement;
   let cursor: HTMLDivElement;
@@ -150,7 +155,6 @@
   let pendingTakeEnd: RecordingEndReason | null = null;
   let takeRequest = 0;
   let takeStop: Promise<void> | null = null;
-  let takeOpenedMic = false;
   let selection = $state<NotePosition | null>(null);
   let loopBoxes = $state<{ x: number; y: number; width: number; height: number }[]>([]);
   const programs = [{ value: 0, name: 'Piano' }, { value: 42, name: 'Violoncelle' }, { value: 48, name: 'Cordes' }, { value: 52, name: 'Chœur' }, { value: 53, name: 'Voix' }, { value: 73, name: 'Flûte' }];
@@ -299,7 +303,7 @@
   function chooseScore(source: ScoreSource): Promise<void> {
     // The request itself is the generation: reserve it before the first await,
     // including a deferred account switch or the initial library lookup.
-    audio.stopAuxiliary();
+    stopAuxiliary();
     const request = { scope: storageScope(), source };
     if (source.kind !== 'library') { libraryOpen = false; workspace = 'score'; }
     opening = request;
@@ -356,7 +360,7 @@
       xml = readMusicXML(yield* openingWait(response.arrayBuffer()));
       info = source.example;
     } else {
-      if (micActive) { pitch.stop(); micActive = false; pitchResult = null; }
+      if (micSession.active || micSession.starting) stopMicrophone();
       xml = source.take.scoreXML;
       info = { title: source.take.title, composer: metadata(xml, source.take.title).composer, subtitle: 'Partition de l’enregistrement' };
     }
@@ -577,6 +581,7 @@
   function animate(now: number) {
     const dt = Math.min(0.1, (now - previousFrame) / 1000 || 0.016);
     previousFrame = now;
+    micActive = micSession.active; micBusy = micSession.starting;
     const looped = audio.update();
     const replayTime = replayTake && replayAudio ? replayAudio.currentTime : 0;
     const time = replayTake ? Math.min(duration, takeMoment(replayTake, replayTime).scoreTime) : audioReady ? audio.time : position;
@@ -625,7 +630,12 @@
   }
   $effect(() => {
     if (workspace !== 'score') keyboardOpen = false;
-    untrack(() => audio.stopAuxiliary());
+    untrack(() => {
+      if (exercise) {
+        exercise.leave();
+        if (workspace === 'exercises') exercise.enter();
+      } else audio.stopAuxiliary();
+    });
   });
   function chooseMode(value: 'auto' | ViewMode) { workspace = 'score'; preference = value; showControls(); }
   function chooseWorkspace(value: typeof workspace) {
@@ -633,14 +643,17 @@
     if (value === 'exercises') { libraryOpen = false; mixerOpen = false; takesOpen = false; }
     workspace = value; showControls();
   }
-  function prepareExercise() {
-    if (workspace !== 'exercises' || takePhase !== 'idle') return false;
+  function stopAuxiliary() { if (exercise) exercise.stop(); else audio.stopAuxiliary(); }
+  async function startExercise(passage: ExercisePassage) {
+    if (workspace !== 'exercises' || takePhase !== 'idle' || !exercise) return;
     if (replayTake) replayAudio?.pause();
     else audio.pause();
     playing = false;
     observeTransport();
-    if (micActive || micBusy) { pitch.stop(); micActive = false; pitchResult = null; }
-    return true;
+    await exercise.start(passage, { deviceId: microphoneId, latencyMs: latency });
+  }
+  function stopMicrophone() {
+    micSession.stop(); pitchResult = null; pitchError = null;
   }
   function playPiano(midi: number) { void audio.pianoNoteOn(midi).catch((cause) => notify(cause instanceof Error ? cause.message : 'Le piano est indisponible.')); }
   function applyMix(save = true) {
@@ -739,17 +752,13 @@
   }
   async function toggleMic() {
     if (takeCapture) { await finishTake(); return; }
-    if (micActive) { pitch.stop(); micActive = false; pitchResult = null; pitchError = null; return; }
-    micBusy = true;
+    if (micSession.active || micSession.starting) { stopMicrophone(); return; }
     try {
-      await pitch.start(audio.context || undefined, microphoneId);
-      if (!pitch.active) return;
-      traceSince = 0; // A newly opened microphone can have a new AudioContext clock.
-      micActive = true;
+      if (!await micSession.acquire('studio', audio.context || undefined, microphoneId)) return;
+      traceSince = 0;
       await refreshMicrophones();
       notify('Micro actif. Un casque aide à isoler votre voix.');
     } catch (cause) { notify(cause instanceof Error ? cause.message : 'Le microphone est indisponible.'); }
-    finally { micBusy = false; }
   }
   async function refreshMicrophones() {
     try { microphones = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === 'audioinput' && device.deviceId !== 'default' && device.deviceId !== 'communications'); }
@@ -759,9 +768,11 @@
   async function changeMicrophone(deviceId: string) {
     microphoneId = deviceId;
     writePreference('chansonade.microphone', deviceId);
-    if (!micActive) return;
-    pitch.stop(); micActive = false; pitchResult = null; pitchError = null;
-    await toggleMic();
+    const owner = micSession.owner;
+    if (!owner) return;
+    stopMicrophone();
+    try { if (await micSession.acquire(owner, audio.context || undefined, microphoneId)) traceSince = 0; }
+    catch (cause) { notify(cause instanceof Error ? cause.message : 'Le microphone est indisponible.'); }
   }
   function addTakeMetadata(kind: 'pitch' | 'transport', point: TakePitch | TakeTransport) {
     const capture = takeCapture;
@@ -812,6 +823,7 @@
     return sample.captureTime >= traceSince && sample.epoch === captureTimeline.epoch;
   }
   function receivePitch(result: PitchResult) {
+    if (exercise?.confirm(result) || workspace === 'exercises') return;
     const context = locatePitch(result);
     if (!context) return;
     const { sample, note, transpose } = context;
@@ -823,11 +835,13 @@
   }
   function receivePreview(results: PitchResult[]) {
     if (disposed) return;
-    pendingPitchSamples = results.flatMap((result) => {
+    const studio = exercise?.preview(results) ?? results;
+    if (workspace === 'exercises') return;
+    pendingPitchSamples = studio.flatMap((result) => {
       const context = locatePitch(result);
       return context && visibleSample(context.sample) ? [context.sample] : [];
     });
-    const latest = results.at(-1);
+    const latest = studio.at(-1);
     if (latest) {
       const context = locatePitch(latest);
       if (context && visibleSample(context.sample)) displayPitch(latest, context);
@@ -870,11 +884,11 @@
     updateVisual(position, 0.016, true);
   }
   function recordingEnded(reason: RecordingEndReason) {
-    if (reason === 'interrupted') { micActive = false; pitchResult = null; pitchError = null; }
+    if (reason === 'interrupted') { pitchResult = null; pitchError = null; }
     audio.pause();
     if (takeCapture) { void finishTake(reason); return; }
     if (takePhase === 'preparing') { pendingTakeEnd = reason; return; }
-    if (reason === 'interrupted') { pitch.stop(); notify('Micro interrompu.'); }
+    if (reason === 'interrupted') { stopAuxiliary(); stopMicrophone(); notify('Micro interrompu.'); }
   }
   async function startTake() {
     if (!audioReady || takePhase !== 'idle') return;
@@ -884,12 +898,13 @@
     const scope = storageScope();
     const request = ++takeRequest;
     takePhase = 'preparing';
-    takeOpenedMic = !micActive;
     audio.pause();
     if (audio.time >= duration - 0.05) restart();
     try {
       await audio.context?.resume();
-      if (!micActive) { await pitch.start(audio.context || undefined, microphoneId); micActive = true; }
+      const ready = await micSession.acquire('take', audio.context || undefined, microphoneId);
+      if (request !== takeRequest) return;
+      if (!ready) throw new Error('Le micro a été arrêté.');
       await refreshMicrophones();
       if (request !== takeRequest) return;
       setFollow(true);
@@ -920,7 +935,7 @@
       if (request !== takeRequest) return;
       if (takeCapture) await finishTake();
       else {
-        if (takeOpenedMic || !pitch.active) { pitch.stop(); micActive = false; }
+        if (!pitch.active) stopMicrophone(); else micSession.release('take');
         pendingTakeEnd = null;
         takePhase = 'idle';
       }
@@ -931,7 +946,7 @@
     if (takePhase !== 'preparing') return;
     ++takeRequest;
     takePhase = 'idle';
-    if (takeOpenedMic) { pitch.stop(); micActive = false; }
+    micSession.release('take');
   }
   function finishTake(reason?: RecordingEndReason): Promise<void> {
     if (takeStop) return takeStop;
@@ -953,7 +968,7 @@
       finally {
         takeCapture = null;
         takeMetadataBudget = null;
-        if (takeOpenedMic || !pitch.active) { pitch.stop(); micActive = false; pitchResult = null; }
+        if (!pitch.active) stopMicrophone(); else micSession.release('take');
         takePhase = 'idle';
         takeStop = null;
         showControls();
@@ -1027,12 +1042,14 @@
   onMount(() => {
     engine = new Score();
     pitch = new PitchInput(receivePitch, receivePreview, recordingEnded);
+    micSession = new MicrophoneSession(pitch);
+    exercise = new ExerciseSession(audio, micSession);
     const beforeUnload = (event: BeforeUnloadEvent) => {
       if (takePhase !== 'idle' || memoryTakes.length) { event.preventDefault(); event.returnValue = ''; }
     };
-    const stopAuxiliary = () => audio.stopAuxiliary();
+    const stopAuxiliaryOnBlur = () => stopAuxiliary();
     const visibilityChanged = () => { if (document.hidden) stopAuxiliary(); };
-    window.addEventListener('blur', stopAuxiliary);
+    window.addEventListener('blur', stopAuxiliaryOnBlur);
     document.addEventListener('visibilitychange', visibilityChanged);
     window.addEventListener('beforeunload', beforeUnload);
     void refreshMicrophones();
@@ -1063,6 +1080,7 @@
     const stopStorage = subscribeStorage((event) => {
       if (event.scope !== storageScope()) return;
       if (event.reason === 'scope') {
+        exercise?.reset();
         cancelLibraryAddition(); libraryReveal = null;
         stopReplay(); showTake(null); takeScope = event.scope;
         customScores = []; libraryTakes = []; organization = projectOrganization(); libraryScope = event.scope;
@@ -1082,7 +1100,7 @@
     return () => {
       disposed = true;
       stopAuxiliary();
-      window.removeEventListener('blur', stopAuxiliary);
+      window.removeEventListener('blur', stopAuxiliaryOnBlur);
       document.removeEventListener('visibilitychange', visibilityChanged);
       cancelLibraryAddition();
       stopSync(); stopStorage();
@@ -1093,7 +1111,7 @@
       observer.disconnect(); engine.destroy();
       navigator.mediaDevices?.removeEventListener('devicechange', devicesChanged);
       const saving = takeCapture ? finishTake() : takeStop;
-      void (saving || Promise.resolve()).finally(() => { pitch.stop(); void audio.destroy(); });
+      void (saving || Promise.resolve()).finally(() => { stopMicrophone(); void audio.destroy(); });
       stopReplay();
       window.removeEventListener('beforeunload', beforeUnload);
       window.removeEventListener('hashchange', invitationChanged);
@@ -1914,13 +1932,13 @@
           </div>
         {/if}
       </footer>
-      {#if workspace === 'exercises'}
+      {#if workspace === 'exercises' && exercise}
         {#key libraryScope}
           <ExerciseView
-            player={audio}
+            session={exercise}
             scope={libraryScope}
             blocked={takePhase !== 'idle'}
-            beforeplay={prepareExercise}
+            onplay={startExercise}
           />
         {/key}
       {/if}

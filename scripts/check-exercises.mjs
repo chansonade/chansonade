@@ -177,6 +177,56 @@ try {
   assert.deepEqual(errors, []);
   console.log('PASS exercise preferences: scoped persistence/reload, explicit anonymous adoption, malformed values, denied getter/read/write, existing-entry protection and translated metadata');
 
+  await page.evaluate(async () => {
+    const { ExerciseSession } = await import('/src/lib/exercise-session.ts');
+    const { MicrophoneSession } = await import('/src/lib/microphone.ts');
+    const { createExercisePassage } = await import('/src/lib/exercises.ts');
+    const check = (value, message) => { if (!value) throw Error(message); };
+    let rejectInput, openings = 0;
+    const denied = new Promise((_resolve, reject) => { rejectInput = reject; });
+    const lease = new MicrophoneSession({ active: false, start() { openings++; return denied; }, stop() {} });
+    const studio = lease.acquire('studio', undefined, ''), borrowed = lease.acquire('exercises', undefined, '');
+    rejectInput(Error('Synthetic denied shared request'));
+    const failures = await Promise.allSettled([studio, borrowed]);
+    check(openings === 1 && failures.every(result => result.status === 'rejected'), 'One physical acquisition broadcasts its failure to all borrowers');
+    const audioClock = { currentTime: 100 }, captureClock = { currentTime: 12 };
+    const input = { context: captureClock, owner: 'studio', active: true,
+      acquire: async () => true, release() {} };
+    const audio = { context: audioClock, exerciseState: { phase: 'playing' }, prepareAuxiliary: async () => {}, stopAuxiliary() {},
+      startExercise: async passage => ({ startedAt: audioClock.currentTime + .25, duration: passage.durationTicks / 480 * 60 / passage.bpm }) };
+    const practice = new ExerciseSession(audio, input);
+    const config = { exerciseId: 'sustained', bpm: 80, step: 1, voice: { low: 48, high: 72, tonic: 57 } };
+    practice.enter();
+    await practice.start(createExercisePassage(config, 'guide'), { deviceId: '', latencyMs: 120 });
+    const result = (time, frequency) => ({ time, frequency, clarity: .9, rms: .1, midi: 69, cents: 0 });
+    const captured = 100.25 - 88 + .12 + 1.6;
+    check(practice.confirm(result(captured, 440)), 'Exercise capture is consumed before score projection');
+    practice.confirm(result(captured + .05, 0));
+    practice.preview([result(captured + .1, 440)]);
+    check(practice.confirmed.length === 2 && practice.pending.length === 1, 'The frontier never enters confirmed history');
+    check(Math.abs(practice.confirmed[0].time - 1.6) < 1e-9 && Math.abs(practice.confirmed[0].cents - 1200) < 1e-9,
+      'Absolute octave error, paired clocks and compensation are preserved');
+    const earliest = practice.confirmed[0].captureTime;
+    for (let i = 7; i < 350; i++) practice.confirm(result(captured + i / 60, 440));
+    check(practice.confirmed[0].captureTime === earliest && practice.confirmed.length > 300, 'Keep the entire passage without a sliding horizon');
+    const fullCount = practice.confirmed.length;
+    practice.confirm(result(captured + 100, 440));
+    check(practice.confirmed.length === fullCount, 'Continued microphone input after the passage does not grow its history');
+    audioClock.currentTime = 120; captureClock.currentTime = 32;
+    config.voice.tonic = 59; config.bpm = 160;
+    await practice.start(createExercisePassage(config, 'solo'), { deviceId: '', latencyMs: 120 });
+    practice.confirm(result(captured, 440));
+    check(practice.confirmed.length === 0, 'Old delayed results cannot enter the next key');
+    practice.confirm(result(120.25 - 88 + .12 + 1, 440));
+    check(practice.confirmed[0].expectedMidi === 59 && practice.state.passage.bpm === 160 && practice.state.passage.mode === 'solo', 'Frozen mode, tempo, key and expected note');
+    audioClock.currentTime = 124; captureClock.currentTime = 36;
+    practice.leave();
+    check(practice.confirm(result(34, 440)), 'Delayed exercise results stay consumed after returning to the studio');
+    check(!practice.confirm(result(37, 440)), 'New studio capture is routed back to the score');
+    check(practice.preview([result(34, 440), result(37, 440)]).length === 1, 'Preview follows the identical capture ownership rule');
+  });
+  console.log('PASS exercise timeline: capture ownership, frozen contexts/clocks/compensation, late frames, full history, silence and independent provisional frontier');
+
   const fixtureXML = `<score-partwise version="4.0"><work><work-title>Synthetic exercise studio</work-title></work>
     <part-list><score-part id="P1"><part-name>Synthetic voice</part-name>
       <midi-instrument id="I1"><midi-channel>1</midi-channel><midi-program>1</midi-program></midi-instrument>
@@ -190,18 +240,27 @@ try {
   const ui = await browser.newContext({ locale: 'fr-BE', viewport: { width: 1280, height: 900 }, hasTouch: true, serviceWorkers: 'block' });
   contexts.push(ui);
   ui.on('page', page => page.on('pageerror', error => errors.push(error.message)));
-  await ui.addInitScript(() => {
+  const syntheticMicrophone = () => {
     if (location.origin === 'null') return;
-    localStorage.setItem('chansonade.language', 'fr');
+    window.__micOpens = 0; window.__micStops = 0; window.__micFrequency = 220;
     navigator.mediaDevices.enumerateDevices = async () => [];
     navigator.mediaDevices.getUserMedia = async () => {
-      const audio = new AudioContext(), destination = audio.createMediaStreamDestination(), oscillator = audio.createOscillator();
-      await audio.resume(); oscillator.frequency.value = 220; oscillator.connect(destination); oscillator.start();
+      if (window.__denyMic) throw new DOMException('Synthetic microphone permission denied', 'NotAllowedError');
+      const audio = new AudioContext(), destination = audio.createMediaStreamDestination();
+      const oscillator = audio.createOscillator(), gain = audio.createGain();
+      await audio.resume(); oscillator.frequency.value = window.__micFrequency; gain.gain.value = .15;
+      oscillator.connect(gain).connect(destination); oscillator.start();
+      window.__signal = { context: audio, frequency: oscillator.frequency, gain: gain.gain };
+      window.__micOpens++;
       const track = destination.stream.getAudioTracks()[0], stop = track.stop.bind(track);
-      track.stop = () => { stop(); oscillator.stop(); void audio.close(); };
+      let stopped = false;
+      track.stop = () => { if (stopped) return; stopped = true; window.__micStops++; stop(); oscillator.stop(); void audio.close(); };
+      if (window.__holdMic) await new Promise(resolve => { window.__releaseMic = resolve; });
       return destination.stream;
     };
-  });
+  };
+  await ui.addInitScript(syntheticMicrophone);
+  await ui.addInitScript(() => { if (location.origin !== 'null') localStorage.setItem('chansonade.language', 'fr'); });
   let sessionUser = null;
   await ui.route('**/api/v1/**', async route => {
     const request = route.request(), path = new URL(request.url()).pathname.split('/api/v1/')[1];
@@ -218,6 +277,8 @@ try {
   await ui.route(url + fixturePath, route => route.fulfill({ contentType: 'text/html', body: `<!doctype html><div id="app"></div>
     <script type="module">
       import { AudioPlayer } from '/src/lib/audio.ts';
+      import { PitchInput } from '/src/lib/pitch.ts';
+      import { ExerciseSession } from '/src/lib/exercise-session.ts';
       import { scoreId, writeSettings, readSettings } from '/src/lib/storage.ts';
       const id = await scoreId(${JSON.stringify(fixtureXML)});
       if (!await readSettings(id, 'anonymous')) await writeSettings(id, {
@@ -225,6 +286,10 @@ try {
         parts: [{channel: 0, program: 73, volume: 35, transpose: 2, muted: false, solo: true}]
       }, 'anonymous');
       window.__exerciseStarts = [];
+      window.__inputs = new Set();
+      const inputStart = PitchInput.prototype.start, sessionStart = ExerciseSession.prototype.start;
+      PitchInput.prototype.start = function (...args) { window.__inputs.add(this); window.__exerciseInput = this; return inputStart.apply(this, args); };
+      ExerciseSession.prototype.start = function (...args) { window.__exerciseSession = this; return sessionStart.apply(this, args); };
       const load = AudioPlayer.prototype.load, start = AudioPlayer.prototype.startExercise;
       AudioPlayer.prototype.load = function (...args) { window.__exerciseAudio = this; return load.apply(this, args); };
       AudioPlayer.prototype.startExercise = function (passage) {
@@ -399,10 +464,176 @@ try {
     if (screenshotDir && width !== 844) await exercisePage.screenshot({ path: `${screenshotDir}/exercises-${width === 390 ? 'phone-portrait' : 'desktop'}.png` });
   }
   assert.deepEqual(errors, [], 'No unhandled exercise UI errors');
+  // Detailed exercise microphone/trace checks follow in the same isolated app.
+
   console.log('PASS exercise UI: first use, editable extents/bounds, manual listen/solo/steps, keyboard, independent studio/replay, recording protection, confirmed adoption/accounts/reload, translations/themes and portrait/landscape');
+
+
+  const setSignal = async (frequency, level = .15) => exercisePage.evaluate(({ frequency, level }) => {
+    window.__micFrequency = frequency;
+    const signal = window.__signal;
+    if (signal?.context.state === 'running') {
+      signal.frequency.cancelScheduledValues(signal.context.currentTime);
+      signal.gain.cancelScheduledValues(signal.context.currentTime);
+      signal.frequency.setValueAtTime(frequency, signal.context.currentTime);
+      signal.gain.setValueAtTime(level, signal.context.currentTime);
+    }
+  }, { frequency, level });
+  const waitPlaying = () => exercisePage.waitForFunction(() => window.__exerciseSession?.state.phase === 'playing');
+  await panel.getByLabel('Motif', { exact: true }).selectOption('sustained');
+  await panel.getByLabel('Tempo des exercices (BPM)').fill('160'); await panel.getByLabel('Tempo des exercices (BPM)').press('Tab');
+  await panel.getByLabel('Note basse').selectOption('48');
+  await panel.getByLabel('Tonique de départ').selectOption('57');
+  const beforeSinging = await studioSnapshot();
+  const listenOpens = await exercisePage.evaluate(() => window.__micOpens);
+  await panel.getByRole('button', { name: 'Écouter', exact: true }).click(); await waitPlaying();
+  assert.equal(await exercisePage.evaluate(() => window.__micOpens), listenOpens, 'Listen does not open the microphone');
+  await setSignal(440);
+  await panel.getByRole('button', { name: 'Avec guide', exact: true }).click(); await waitPlaying();
+  await exercisePage.waitForFunction(() => window.__exerciseSession.confirmed.some(point => point.time > 1 && point.cents > 1150));
+  const frontier = await exercisePage.evaluate(() => {
+    const session = window.__exerciseSession;
+    return { confirmed: session.confirmed.map(point => point.captureTime), pending: session.pending.map(point => point.captureTime), first: session.confirmed[0].captureTime };
+  });
+  assert(frontier.pending.length > 0 && frontier.pending.every(time => !frontier.confirmed.includes(time)), 'Real decoder pending points never enter confirmed history');
+  await panel.locator('.exercise-pending').waitFor({ state: 'attached' });
+  await exercisePage.evaluate(() => {
+    const signal = window.__signal, now = signal.context.currentTime;
+    signal.gain.setValueAtTime(0, now);
+    signal.frequency.setValueAtTime(220, now + .55);
+    signal.gain.setValueAtTime(.15, now + .55);
+  });
+  await exercisePage.waitForFunction(() => window.__exerciseSession.state.phase === 'ended');
+  await exercisePage.waitForFunction(() => window.__exerciseSession.confirmed.at(-1)?.time > 3.5);
+  const sung = await exercisePage.evaluate(() => {
+    const session = window.__exerciseSession;
+    return { points: session.confirmed, pending: session.pending, key: session.state.passage.tonic, mode: session.state.passage.mode,
+      path: document.querySelector('.exercise-confirmed')?.getAttribute('d'), opens: window.__micOpens };
+  });
+  assert.equal(sung.points[0].captureTime, frontier.first, 'The first captured point survives until passage end');
+  assert(sung.points.length > 120 && sung.points.some(point => point.frequency === 0), 'Keep the full passage and real decoded silences');
+  assert(sung.points.some(point => Math.abs(point.frequency - 440) < 3 && point.cents > 1150), 'A genuine octave error remains visible as about +1200 cents');
+  assert(sung.points.some(point => Math.abs(point.frequency - 220) < 3 && point.cents !== null && Math.abs(point.cents) < 30), 'Known corrected sine keeps its actual pitch');
+  assert((sung.path.match(/M/g) || []).length >= 2, 'Silence interrupts the SVG path');
+  assert.deepEqual(await studioSnapshot(), beforeSinging, 'Microphone and trace do not change score position, tempo, mix or loop');
+  const stopsBeforeStop = await exercisePage.evaluate(() => window.__micStops);
+  await panel.getByRole('button', { name: 'Stop', exact: true }).click();
+  await exercisePage.waitForFunction(() => !window.__exerciseInput.active);
+  assert.equal(await exercisePage.evaluate(() => window.__micStops), stopsBeforeStop + 1, 'Stop releases an input opened by the view');
+
+  await setSignal(330);
+  await panel.getByRole('button', { name: 'Seul', exact: true }).click(); await waitPlaying();
+  await exercisePage.waitForFunction(() => window.__exerciseSession.confirmed.some(point => point.time > 1 && Math.abs(point.frequency - 330) < 3));
+  const oldCapture = await exercisePage.evaluate(async () => {
+    const worker = window.__exerciseInput.worker, receive = worker.onmessage;
+    window.__heldExerciseFrames = [];
+    worker.onmessage = event => window.__heldExerciseFrames.push(event.data);
+    window.__releaseExerciseFrames = () => {
+      worker.onmessage = receive;
+      for (const data of window.__heldExerciseFrames) receive.call(worker, { data });
+    };
+    await new Promise(resolve => setTimeout(resolve, 220));
+    return { opens: window.__micOpens, count: window.__heldExerciseFrames.length, first: window.__exerciseSession.confirmed[0].captureTime };
+  });
+  assert(oldCapture.count > 0, 'Hold real decoded frames, without replacing YIN or the temporal decoder');
+  await panel.getByRole('button', { name: 'Tonalité suivante', exact: true }).click(); await waitPlaying();
+  await exercisePage.evaluate(() => window.__releaseExerciseFrames());
+  assert.equal(await exercisePage.evaluate(() => window.__micOpens), oldCapture.opens, 'Next key reuses the same microphone and worker');
+  await exercisePage.waitForFunction(() => window.__exerciseSession.confirmed.some(point => point.time > 1 && point.expectedMidi !== null));
+  const nextKey = await exercisePage.evaluate(() => ({
+    points: window.__exerciseSession.confirmed, pending: window.__exerciseSession.pending,
+    passage: window.__exerciseSession.state.passage, origin: window.__exerciseSession.state.startedAt,
+  }));
+  assert.equal(nextKey.passage.mode, 'solo'); assert.equal(nextKey.passage.tonic, 59);
+  assert(nextKey.points.every(point => point.captureTime > oldCapture.first && point.time >= 0), 'Delayed old-key frames do not enter the new passage');
+  assert(nextKey.points.filter(point => point.expectedMidi !== null).every(point => point.expectedMidi === 59), 'Solo uses its frozen expected note');
+  assert(nextKey.points.some(point => Math.abs(point.frequency - 330) < 3 && Math.abs(point.cents - 500) < 30), 'Solo traces the real voice without any sung guide notes');
+  await exercisePage.getByRole('button', { name: 'Partition', exact: true }).click();
+  await exercisePage.waitForFunction(() => !window.__exerciseInput.active);
+
+  // Borrow the studio input; neither repeating, listening nor leaving may close it.
+  await exercisePage.getByRole('button', { name: 'Écouter ma voix', exact: true }).click();
+  await exercisePage.waitForFunction(() => window.__exerciseInput.active);
+  const borrowed = await exercisePage.evaluate(() => ({ opens: window.__micOpens, stops: window.__micStops }));
+  await chooseExercises();
+  await panel.getByRole('button', { name: 'Avec guide', exact: true }).click(); await waitPlaying();
+  assert.deepEqual(await exercisePage.evaluate(() => ({ opens: window.__micOpens, stops: window.__micStops })), borrowed, 'Guide borrows the active studio input without a stop/reopen');
+  await panel.getByRole('button', { name: 'Écouter', exact: true }).click(); await waitPlaying();
+  assert.equal(await exercisePage.evaluate(() => window.__exerciseSession.confirmed.length), 0, 'Listen does not trace borrowed microphone input');
+  await exercisePage.getByRole('button', { name: 'Partition', exact: true }).click();
+  assert(await exercisePage.evaluate(() => window.__exerciseInput.active), 'Leaving preserves a microphone opened by the studio');
+  await exercisePage.getByRole('button', { name: 'Arrêter le microphone', exact: true }).click();
+  await exercisePage.waitForFunction(() => !window.__exerciseInput.active);
+
+  // A permission prompt completing after Stop must not revive capture or sound.
+  await chooseExercises();
+  await exercisePage.evaluate(() => { window.__holdMic = true; });
+  const startsBeforePrompt = await exercisePage.evaluate(() => window.__exerciseStarts.length);
+  await panel.getByRole('button', { name: 'Avec guide', exact: true }).click();
+  await exercisePage.waitForFunction(() => !!window.__releaseMic);
+  await panel.getByRole('button', { name: 'Stop', exact: true }).click();
+  await exercisePage.evaluate(() => { window.__holdMic = false; window.__releaseMic(); });
+  await exercisePage.waitForTimeout(250);
+  assert(await exercisePage.evaluate(() => !window.__exerciseInput.active && window.__exerciseAudio.exerciseState.phase === 'idle'), 'Late permission completion stays stopped');
+  assert.equal(await exercisePage.evaluate(() => window.__exerciseStarts.length), startsBeforePrompt);
+  await exercisePage.evaluate(() => { window.__denyMic = true; });
+  await panel.getByRole('button', { name: 'Avec guide', exact: true }).click();
+  await panel.getByRole('status').filter({ hasText: 'Synthetic microphone permission denied' }).waitFor();
+  assert.equal(await exercisePage.evaluate(() => window.__exerciseStarts.length), startsBeforePrompt, 'Permission refusal never starts the accompaniment');
+  await exercisePage.evaluate(() => { window.__denyMic = false; });
+
+  await panel.getByRole('button', { name: 'Avec guide', exact: true }).click(); await waitPlaying();
+  await exercisePage.waitForFunction(() => window.__exerciseSession.pending.length > 0);
+  await exercisePage.evaluate(() => {
+    const session = window.__exerciseSession, stop = session.stop.bind(session);
+    session.stop = () => {
+      const before = session.pending, confirmed = session.confirmed.length;
+      stop();
+      window.__stoppedTrace = { before, after: session.pending, confirmedBefore: confirmed, confirmedAfter: session.confirmed.length };
+    };
+  });
+  await exercisePage.evaluate(() => window.dispatchEvent(new Event('blur')));
+  await exercisePage.waitForFunction(() => !window.__exerciseInput.active && window.__exerciseAudio.exerciseState.phase === 'idle');
+  const stoppedTrace = await exercisePage.evaluate(() => window.__stoppedTrace);
+  assert(stoppedTrace.before.length > 0, 'Stop regression observes a real provisional frontier');
+  assert.deepEqual(stoppedTrace.after, stoppedTrace.before, 'Stopping capture keeps its last frontier dotted');
+  assert.equal(stoppedTrace.confirmedBefore, stoppedTrace.confirmedAfter, 'Stop never promotes provisional samples into confirmed points');
+  await panel.getByRole('button', { name: 'Avec guide', exact: true }).click(); await waitPlaying();
+  await exercisePage.evaluate(async a => (await import('/src/lib/sync.ts')).login(a.email, 'synthetic'), accountB);
+  assert(await exercisePage.evaluate(() => !window.__exerciseInput.active && !window.__exerciseSession.confirmed.length), 'Account switch releases owned capture and removes the old trace');
+  await exercisePage.evaluate(async a => (await import('/src/lib/sync.ts')).login(a.email, 'synthetic'), accountA);
+  assert.equal(await exercisePage.evaluate(() => window.__inputs.size), 1, 'Studio, takes and exercises use one PitchInput instance');
+
+  // Required screenshots show the genuine decoder trace, not injected points.
+  if (await exercisePage.locator('.toast').count()) await exercisePage.getByRole('button', { name: 'Fermer le message', exact: true }).click();
+  await panel.getByLabel('Motif', { exact: true }).selectOption('sustained');
+  await panel.getByLabel('Tonique de départ').selectOption('57');
+  await setSignal(440);
+  await panel.getByRole('button', { name: 'Avec guide', exact: true }).click(); await waitPlaying();
+  await exercisePage.waitForFunction(() => window.__exerciseSession.state.phase === 'ended' && window.__exerciseSession.confirmed.at(-1)?.time > 3.5);
+  await panel.getByRole('button', { name: 'Stop', exact: true }).click();
+  for (const [width, height, theme] of [[1280,900,'light'], [390,844,'dark']]) {
+    await exercisePage.setViewportSize({ width, height });
+    await exercisePage.evaluate(async theme => (await import('/src/lib/theme.ts')).themePreference.set(theme), theme);
+    await exercisePage.waitForTimeout(180);
+    await panel.locator('.exercise-scroll').evaluate(node => { node.scrollTop = node.scrollHeight; });
+    for (const button of await panel.locator('button').all()) {
+      const box = await button.boundingBox(); assert(box.width >= 44 && box.height >= 44, 'All six actions keep 44px touch targets');
+    }
+    if (width === 390) {
+      for (const language of ['en', 'de', 'nl', 'fr']) {
+        await exercisePage.evaluate(async language => (await import('/src/lib/i18n.ts')).setLanguage(language), language);
+        assert(await panel.locator('.exercise-actions button').evaluateAll(buttons => buttons.every(button => button.scrollWidth <= button.clientWidth + 1)), 'Translated action text stays inside its touch target');
+      }
+    }
+    if (screenshotDir) await exercisePage.screenshot({ path: `${screenshotDir}/exercises-${width === 390 ? 'phone-portrait' : 'desktop'}.png` });
+  }
+  assert.deepEqual(errors, [], 'No unhandled exercise microphone errors');
+  console.log('PASS exercise microphone: real sine pitches/octave/silence/full trace, separate frontier, late decoded frames/key changes, solo, reuse/borrow/cleanup, permission cancellation/refusal, blur, accounts and one PitchInput');
 
   // Cached identity is not a confirmed connection. Adoption updates an already open view.
   const cached = await browser.newContext({ serviceWorkers: 'block' }); contexts.push(cached);
+  await cached.addInitScript(syntheticMicrophone);
   cached.on('page', page => page.on('pageerror', error => errors.push(error.message)));
   const guest = { exerciseId: 'arpeggio', bpm: 83, step: 2, voice: { low: 48, high: 72, tonic: 55 } };
   await cached.addInitScript(({ account, guest }) => {
@@ -422,6 +653,18 @@ try {
   await cached.route('**/scores/*.musicxml', async route => { await scoreReady; return route.fulfill({ contentType: 'application/xml', body: fixtureXML }); });
   const cachedPage = await cached.newPage();
   await cachedPage.goto(url);
+  await cachedPage.evaluate(async () => {
+    const { PitchInput } = await import('/src/lib/pitch.ts');
+    const { ExerciseSession } = await import('/src/lib/exercise-session.ts');
+    const startInput = PitchInput.prototype.start, startSession = ExerciseSession.prototype.start;
+    PitchInput.prototype.start = function (...args) { window.__separateInput = this; return startInput.apply(this, args); };
+    ExerciseSession.prototype.start = function (...args) { window.__separateSession = this; return startSession.apply(this, args); };
+  });
+  await cachedPage.getByRole('button', { name: 'Écouter ma voix', exact: true }).click();
+  await cachedPage.waitForFunction(() => window.__separateInput?.active);
+  await cachedPage.getByRole('button', { name: 'Voix & instruments', exact: true }).click();
+  await cachedPage.locator('#latency').evaluate(input => { input.value = '120'; input.dispatchEvent(new Event('input', { bubbles: true })); });
+  await cachedPage.locator('.mixer-panel').getByRole('button', { name: 'Fermer les instruments', exact: true }).click();
   await cachedPage.getByRole('button', { name: 'Exercices', exact: true }).click();
   assert.equal(await cachedPage.locator('.exercise-view').getByLabel('Tessiture indicative').inputValue(), '', 'Cached account alone does not adopt anonymous preferences');
   confirmSession();
@@ -433,9 +676,17 @@ try {
     const start = AudioPlayer.prototype.startExercise;
     AudioPlayer.prototype.startExercise = function (passage) { window.__earlyExerciseAudio = this; return start.call(this, passage); };
   });
-  await cachedPage.locator('.exercise-view').getByRole('button', { name: 'Écouter', exact: true }).click();
+  await cachedPage.locator('.exercise-view').getByRole('button', { name: 'Avec guide', exact: true }).click();
   await cachedPage.waitForFunction(() => window.__earlyExerciseAudio?.exerciseState.phase === 'playing');
   assert.equal(await cachedPage.evaluate(() => window.__earlyExerciseAudio.loaded), false, 'Exercises can start before the initial score loads');
+  await cachedPage.waitForFunction(() => window.__separateSession.confirmed.some(point => point.frequency > 0 && point.time > 1));
+  assert(await cachedPage.evaluate(() => window.__separateInput.contextClock !== window.__earlyExerciseAudio.context), 'Borrowed studio input keeps its separate AudioContext');
+  const clock = await cachedPage.evaluate(() => {
+    const run = window.__separateSession.run, point = window.__separateSession.confirmed.find(point => point.time > 1 && point.frequency > 0);
+    return { offset: run.offset, latencyMs: run.latencyMs, error: point.time - (point.captureTime + run.offset - run.latencyMs / 1000 - run.origin.startedAt), opens: window.__micOpens };
+  });
+  assert(Math.abs(clock.offset) > .1 && Math.abs(clock.error) < 1e-9 && clock.latencyMs === 120 && clock.opens === 1, 'Clock conversion and frozen microphone compensation use capture times without reopening');
+
   releaseScore();
   await cachedPage.waitForFunction(() => window.__earlyExerciseAudio.loaded);
   assert.notEqual(await cachedPage.evaluate(() => window.__earlyExerciseAudio.exerciseState.phase), 'idle', 'Late studio loading must not cancel a newer exercise');

@@ -1,59 +1,61 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { ChevronLeft, ChevronRight, Play, Square, Music2 } from '@lucide/svelte';
-  import type { AudioPlayer, ExerciseState } from './audio';
+  import type { ExerciseSession, ExerciseSessionState, ExercisePitch } from './exercise-session';
+  import ExercisePlot from './ExercisePlot.svelte';
   import { t, locale, noteName } from './i18n';
   import {
     EXERCISES, VOICE_RANGES, EXERCISE_PITCH_LIMITS, createExercisePassage,
-    exerciseTonicBounds, exerciseSecondsAt, normalizeExercisePreferences, stepExercise,
+    exerciseTonicBounds, normalizeExercisePreferences, stepExercise,
     readExercisePreferences, writeExercisePreferences, subscribeExercisePreferences,
-    type ExercisePreferences,
+    type ExercisePreferences, type ExerciseMode, type ExercisePassage,
   } from './exercises';
 
-  let { player, scope, blocked, beforeplay }: {
-    player: AudioPlayer;
+  let { session, scope, blocked, onplay }: {
+    session: ExerciseSession;
     scope: string;
     blocked: boolean;
-    beforeplay: () => boolean;
+    onplay: (passage: ExercisePassage) => Promise<void>;
   } = $props();
   const id = $props.id();
   let settings = $state<ExercisePreferences>(untrack(() => readExercisePreferences(scope)));
-  let action = $state<'listen' | 'solo'>('listen');
-  let playback = $state.raw<ExerciseState>({ phase: 'idle' });
+  let action = $state<ExerciseMode>('listen');
+  let playback = $state.raw<ExerciseSessionState>({ phase: 'idle' });
   let error = $state('');
-  let width = $state(600);
-  let plot: HTMLDivElement;
+  let confirmed = $state.raw<ExercisePitch[]>([]);
+  let pending = $state.raw<ExercisePitch[]>([]);
+  let microphoneActive = $state(false);
+  let canStop = $state(false);
   let disposed = false;
   const bounds = $derived(settings.voice ? exerciseTonicBounds(settings.exerciseId, settings.voice) : null);
   const passage = $derived(bounds ? createExercisePassage(settings, action) : null);
   const shown = $derived(playback.phase === 'idle' ? passage : playback.passage);
-  const notes = $derived(shown?.notes.filter(note => note.role === 'voice') ?? []);
-  const cueEnd = $derived(Math.max(0, ...(shown?.notes.filter(note => note.role === 'cue').map(note => note.endTick) ?? [])));
-  const low = $derived(notes.length ? Math.min(...notes.map(note => note.midi)) : 60);
-  const high = $derived(notes.length ? Math.max(...notes.map(note => note.midi)) : 72);
-  const rows = $derived(Array.from({ length: high - low + 3 }, (_, i) => high + 1 - i));
   const preset = $derived(settings.voice
     ? VOICE_RANGES.findIndex(range => range.low === settings.voice!.low && range.high === settings.voice!.high)
     : -1);
   const pitches = Array.from({ length: EXERCISE_PITCH_LIMITS.high - EXERCISE_PITCH_LIMITS.low + 1 }, (_, i) => i + EXERCISE_PITCH_LIMITS.low);
   const previous = $derived(stepExercise(settings, -1));
   const next = $derived(stepExercise(settings, 1));
-  const running = $derived(playback.phase === 'preparing' || playback.phase === 'playing');
-  const time = $derived('time' in playback ? playback.time : 0);
-  const phase = $derived(playback.phase === 'preparing' ? 'Préparation des instruments…'
-    : playback.phase === 'playing' ? shown?.mode === 'solo' ? 'Chantez après l’accord de départ.' : 'Écoutez le motif.'
-    : playback.phase === 'ended' ? 'Passage terminé. Recommencez ou changez de tonalité.' : 'Prêt à commencer.');
+  const phase = $derived(playback.phase === 'preparing' ? shown?.mode === 'listen' ? 'Préparation des instruments…' : 'Préparation du micro et des instruments…'
+    : playback.phase === 'playing' ? shown?.mode === 'solo' ? 'Chantez après l’accord de départ.' : shown?.mode === 'guide' ? 'Chantez avec le guide.' : 'Écoutez le motif.'
+    : playback.phase === 'ended' ? 'Passage terminé. Recommencez ou changez de tonalité.'
+    : playback.phase === 'stopped' ? 'Passage arrêté. La courbe reste affichée.' : 'Prêt à commencer.');
   const label = (midi: number) => noteName(midi, $locale);
-  const x = (tick: number) => 48 + tick / (shown?.durationTicks || 1) * (width - 64);
-  const y = (midi: number) => 20 + (high + 1 - midi) / (high - low + 2) * 150;
-  const cursorX = $derived(shown ? x(time / exerciseSecondsAt(shown, shown.durationTicks) * shown.durationTicks) : 48);
-
-  function stop() { player.stopAuxiliary(); playback = player.exerciseState; }
-  function change(value: ExercisePreferences) {
-    stop(); error = '';
+  const latest = $derived(pending.at(-1) ?? confirmed.at(-1));
+  const measuredMidi = $derived(latest && latest.frequency > 0 ? 69 + 12 * Math.log2(latest.frequency / 440) : null);
+  const cents = $derived(latest?.cents === null || latest?.cents === undefined ? null : Math.round(latest.cents));
+  function refresh() {
+    playback = session.state;
+    confirmed = session.confirmed; pending = session.pending;
+    microphoneActive = session.microphoneActive; canStop = session.canStop;
+  }
+  function stop() { session.stop(); refresh(); }
+  function save(value: ExercisePreferences) {
+    error = '';
     settings = normalizeExercisePreferences(value);
     writeExercisePreferences(scope, settings);
   }
+  function change(value: ExercisePreferences) { session.clear(); save(value); refresh(); }
   function changeVoice(patch: Partial<NonNullable<ExercisePreferences['voice']>>) {
     if (settings.voice) change({ ...settings, voice: { ...settings.voice, ...patch } });
   }
@@ -62,17 +64,17 @@
     if (range) change({ ...settings, voice: { low: range.low, high: range.high, tonic: settings.voice?.tonic ?? range.low } });
   }
   async function play(mode: typeof action = action) {
-    if (blocked || !passage || !beforeplay()) return;
+    if (blocked || !passage) return;
     error = ''; action = mode;
-    try { await player.startExercise(createExercisePassage(settings, mode)); }
+    try { await onplay(createExercisePassage(settings, mode)); }
     catch (cause) { if (!disposed) error = cause instanceof Error ? cause.message : 'Impossible de jouer cet exercice.'; }
-    if (!disposed) playback = player.exerciseState;
+    if (!disposed) refresh();
   }
   function transpose(direction: -1 | 1) {
     if (blocked) return;
     const moved = stepExercise(settings, direction);
     if (!moved) return;
-    change(moved);
+    save(moved);
     void play();
   }
   function keydown(event: KeyboardEvent) {
@@ -88,17 +90,15 @@
     const observePreferences = subscribeExercisePreferences(scope, () => {
       const saved = readExercisePreferences(scope);
       if (JSON.stringify(saved) === JSON.stringify(settings)) return;
-      stop(); settings = saved; error = '';
+      session.clear(); settings = saved; error = ''; refresh();
     });
-    const observer = new ResizeObserver(entries => { width = Math.max(240, entries[0].contentRect.width); });
-    observer.observe(plot);
     let frame = 0;
-    const update = () => { playback = player.exerciseState; frame = requestAnimationFrame(update); };
+    const update = () => { refresh(); frame = requestAnimationFrame(update); };
     frame = requestAnimationFrame(update);
     window.addEventListener('keydown', keydown);
     return () => {
       disposed = true;
-      cancelAnimationFrame(frame); observer.disconnect(); observePreferences();
+      cancelAnimationFrame(frame); observePreferences();
       window.removeEventListener('keydown', keydown);
     };
   });
@@ -212,37 +212,15 @@
           {/if}
         </select>
       </label>
-      <p>{passage ? $t('Notes du motif : {low} à {high}', { low: label(low), high: label(high) }) : $t('Toutes les notes chantées doivent rester dans votre étendue.')}</p>
     </div>
-    <div class="exercise-plot" bind:this={plot}>
-      <svg width="100%" height="220" viewBox="0 0 {width} 220" role="img" aria-label={$t('Notes attendues du motif')}>
-        {#if shown}
-          {#each rows as midi}
-            <line x1="43" x2={width - 12} y1={y(midi)} y2={y(midi)} class="pitch-grid" />
-            {#if midi === low || midi === high || midi % 12 === 0}
-              <text x="2" y={y(midi) + 4} class="pitch-label">{label(midi)}</text>
-            {/if}
-          {/each}
-          <rect x={x(0)} y="10" width={x(cueEnd) - x(0)} height="172" class="cue-band" />
-          <text x={x(0)} y="204" class="pitch-label">{$t('Accord')}</text>
-          {#each notes as note}
-            <rect
-              x={x(note.startTick)}
-              y={y(note.midi) - 5}
-              width={Math.max(3, x(note.endTick) - x(note.startTick))}
-              height="10"
-              rx="3"
-              class="expected-note"
-              class:without-guide={shown.mode === 'solo'}
-            />
-            <text x={x(note.startTick)} y="204" class="syllable">{note.syllable}</text>
-          {/each}
-          {#if playback.phase === 'playing' || playback.phase === 'ended'}
-            <line x1={cursorX} x2={cursorX} y1="8" y2="183" class="exercise-cursor" />
-          {/if}
-        {/if}
-      </svg>
+    <div class="exercise-voice" aria-live="off">
+      <span class:active={microphoneActive}>{microphoneActive ? $t('Micro actif') : $t('Micro au repos')}</span>
+      <strong>{measuredMidi === null ? '—' : label(Math.round(measuredMidi))}</strong>
+      <span>{$t('Écart à la note attendue')}</span>
+      <output>{cents === null ? '—' : $t('{value} cents', { value: `${cents > 0 ? '+' : ''}${cents}` })}</output>
     </div>
+    <ExercisePlot preview={passage} playback={playback} {confirmed} {pending} />
+    <p class="microphone-help">{$t('Utilisez un casque pour isoler votre voix. La courbe montre aussi les erreurs de hauteur et les silences.')}</p>
     <p class="exercise-status" role="status">{$t(error || (passage ? phase : 'Choisissez une étendue vocale pour commencer.'))}</p>
   </div>
   <footer class="exercise-transport">
@@ -267,6 +245,16 @@
       </button>
       <button
         class="exercise-play"
+        class:chosen={action === 'guide'}
+        aria-pressed={action === 'guide'}
+        disabled={blocked || !passage}
+        onclick={() => void play('guide')}
+      >
+        <Music2 size={17} />
+        {$t('Avec guide')}
+      </button>
+      <button
+        class="exercise-play"
         class:chosen={action === 'solo'}
         aria-pressed={action === 'solo'}
         disabled={blocked || !passage}
@@ -283,12 +271,12 @@
       >
         <ChevronRight size={22} />
       </button>
-      <button class="exercise-stop" disabled={!running && playback.phase !== 'ended'} onclick={stop}>
+      <button class="exercise-stop" aria-label={$t('Stop')} disabled={!canStop} onclick={stop}>
         <Square size={16} />
-        {$t('Stop')}
+        <span>{$t('Stop')}</span>
       </button>
     </div>
-    <p>{$t('Écouter : le motif au piano. Seul : l’accord de départ, puis à vous.')}</p>
+    <p>{$t('Écouter : piano seul. Avec guide : chantez avec le piano. Seul : l’accord, puis votre voix.')}</p>
     <p class="shortcut-help">{$t('Espace : rejouer · Flèches : changer de tonalité · Échap : arrêter')}</p>
   </footer>
 </section>
@@ -310,15 +298,11 @@
   .tonality > div > span { display: block; font-size: 11px; color: var(--subtle); margin-bottom: 4px; }
   .tonality strong { font-size: 23px; font-weight: 600; letter-spacing: -.5px; }
   .tonality select { width: 94px; }
-  .tonality > p { margin-left: auto; font-size: 12px; color: var(--subtle); }
-  .exercise-plot { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 8px; }
-  .exercise-plot svg { display: block; overflow: hidden; }
-  .pitch-grid { stroke: var(--line); stroke-width: 1; }
-  .pitch-label, .syllable { fill: var(--subtle); font-size: 11px; }
-  .expected-note { fill: var(--accent); stroke: var(--accent); }
-  .expected-note.without-guide { fill: var(--accent-soft); stroke-dasharray: 3 2; }
-  .cue-band { fill: var(--accent-soft); }
-  .exercise-cursor { stroke: var(--coral); stroke-width: 2; }
+  .exercise-voice { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; min-height: 42px; color: var(--subtle); font-size: 12px; }
+  .exercise-voice > strong { color: var(--coral); font-size: 18px; min-width: 50px; }
+  .exercise-voice > .active { color: var(--coral); }
+  .exercise-voice > output { font-variant-numeric: tabular-nums; min-width: 80px; color: var(--ink); }
+  .microphone-help { color: var(--subtle); font-size: 11px; line-height: 1.6; margin-top: 10px; }
   .exercise-status { min-height: 36px; padding-top: 12px; font-size: 12px; color: var(--subtle); line-height: 1.6; }
   .exercise-transport { flex: none; padding: 14px 16px calc(14px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: var(--surface); text-align: center; }
   .exercise-actions { display: flex; justify-content: center; gap: 10px; }
@@ -334,11 +318,11 @@
     fieldset { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .motif-choice, fieldset > label:nth-of-type(2) { grid-column: auto; }
     .tonality { margin-top: 20px; }
-    .tonality > p { margin-left: 0; width: 100%; }
     .exercise-actions { gap: 5px; }
-    .exercise-actions button { padding: 8px; font-size: 13px; }
-    .exercise-actions .exercise-step { min-width: 44px; }
-    .exercise-play { flex: 1; }
+    .exercise-actions button { padding: 6px; min-height: 56px; font-size: 12px; }
+    .exercise-actions .exercise-step, .exercise-actions .exercise-stop { min-width: 44px; width: 44px; padding: 6px; }
+    .exercise-stop > span { display: none; }
+    .exercise-play { flex: 1; min-width: 0; overflow-wrap: anywhere; line-height: 1.2; }
     .exercise-play > :global(svg) { display: none; }
     .exercise-transport { padding: 10px 10px calc(10px + env(safe-area-inset-bottom)); }
     .shortcut-help { display: none; }

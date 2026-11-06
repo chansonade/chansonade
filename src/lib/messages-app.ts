@@ -1,6 +1,18 @@
 // French source text is the stable key. Musical titles, lyrics and user data
 // remain unchanged; named placeholders are interpolated by the i18n runtime.
 const messages: readonly [string, string, string, string][] = [
+  ["Préparation du micro et des instruments…", "Preparing microphone and instruments…", "Mikrofon und Instrumente werden vorbereitet…", "Microfoon en instrumenten voorbereiden…"],
+  ["Passage arrêté. La courbe reste affichée.", "Passage stopped. The trace remains visible.", "Passage gestoppt. Die Kurve bleibt sichtbar.", "Passage gestopt. De curve blijft zichtbaar."],
+  ["Avec guide", "With guide", "Mit Begleitung", "Met begeleiding"],
+  ["Chantez avec le guide.", "Sing along with the guide.", "Singe mit der Begleitung.", "Zing met de begeleiding mee."],
+  ["Micro au repos", "Microphone idle", "Mikrofon inaktiv", "Microfoon in rust"],
+  ["Écart à la note attendue", "Difference from the expected note", "Abweichung vom erwarteten Ton", "Afwijking van de verwachte noot"],
+  ["Notes attendues et hauteur réelle de votre voix", "Expected notes and the actual pitch of your voice", "Erwartete Töne und die tatsächliche Tonhöhe deiner Stimme", "Verwachte noten en de werkelijke toonhoogte van je stem"],
+  ["Notes attendues", "Expected notes", "Erwartete Töne", "Verwachte noten"],
+  ["Votre voix", "Your voice", "Deine Stimme", "Je stem"],
+  ["Décodage provisoire", "Provisional decoding", "Vorläufige Dekodierung", "Voorlopige decodering"],
+  ["Utilisez un casque pour isoler votre voix. La courbe montre aussi les erreurs de hauteur et les silences.", "Use headphones to isolate your voice. The trace also shows pitch errors and silences.", "Nutze Kopfhörer, um deine Stimme zu isolieren. Die Kurve zeigt auch Tonhöhenfehler und Stille.", "Gebruik een hoofdtelefoon om je stem te isoleren. De curve toont ook toonhoogtefouten en stiltes."],
+  ["Écouter : piano seul. Avec guide : chantez avec le piano. Seul : l’accord, puis votre voix.", "Listen: piano only. With guide: sing along with the piano. On your own: the chord, then your voice.", "Anhören: nur Klavier. Mit Begleitung: singe zum Klavier. Allein: der Akkord, dann deine Stimme.", "Luisteren: alleen piano. Met begeleiding: zing met de piano mee. Zelf zingen: het akkoord, dan je stem."],
   ["Studio : {title}", "Studio: {title}", "Studio: {title}", "Studio: {title}"],
   ["Aucune partition ouverte", "No score open", "Keine Partitur geöffnet", "Geen partituur geopend"],
   ["Exercices", "Exercises", "Übungen", "Oefeningen"],
@@ -34,7 +46,6 @@ const messages: readonly [string, string, string, string][] = [
   ["Écouter", "Listen", "Anhören", "Luisteren"],
   ["Seul", "On your own", "Allein", "Zelf zingen"],
   ["Stop", "Stop", "Stopp", "Stop"],
-  ["Écouter : le motif au piano. Seul : l’accord de départ, puis à vous.", "Listen: the pattern on the piano. On your own: the opening chord, then your turn.", "Anhören: das Motiv am Klavier. Allein: der Anfangsakkord, dann bist du dran.", "Luisteren: het patroon op de piano. Zelf zingen: het beginakkoord, dan ben jij aan de beurt."],
   ["Espace : rejouer · Flèches : changer de tonalité · Échap : arrêter", "Space: replay · Arrows: change key · Escape: stop", "Leertaste: wiederholen · Pfeile: Tonart wechseln · Escape: stoppen", "Spatie: herhalen · Pijlen: toonsoort wijzigen · Escape: stoppen"],
   ["Chantez après l’accord de départ.", "Sing after the opening chord.", "Singe nach dem Anfangsakkord.", "Zing na het beginakkoord."],
   ["Écoutez le motif.", "Listen to the pattern.", "Höre dir das Motiv an.", "Luister naar het patroon."],

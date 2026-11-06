@@ -329,7 +329,7 @@ export class AudioPlayer {
     this.synth?.midiChannels[channel]?.setSystemParameter('keyShift', Math.round(clamp(semitones, -48, 48)));
   }
 
-  private async initializeAuxiliary() {
+  async prepareAuxiliary() {
     if (this.destroyed) throw new Error('Le lecteur audio a été fermé.');
     if (!this.auxiliaryInitialization) {
       this.auxiliaryInitialization = (async () => {
@@ -367,7 +367,7 @@ export class AudioPlayer {
         throw error;
       });
     }
-    await this.auxiliaryInitialization;
+    await Promise.all([this.auxiliaryInitialization, this.audioContext?.resume()]);
   }
 
   get exerciseState(): ExerciseState {
@@ -390,8 +390,7 @@ export class AudioPlayer {
     const activity: AuxiliaryActivity = { kind: 'exercise', passage, cancellation: new AbortController(), start: null };
     this.auxiliaryActivity = activity;
     try {
-      const initialization = this.initializeAuxiliary();
-      await Promise.all([initialization, this.audioContext?.resume()]);
+      await this.prepareAuxiliary();
       if (this.auxiliaryActivity !== activity) return null;
       const task = this.auxiliaryQueue.then(async () => {
         if (this.auxiliaryActivity !== activity) return null;
@@ -424,9 +423,7 @@ export class AudioPlayer {
     const note = Math.round(clamp(midi, 0, 127));
     activity.held.set(note, (activity.held.get(note) ?? 0) + 1);
     try {
-      const initialization = this.initializeAuxiliary();
-      // initialize creates the context synchronously, so resume stays in the gesture.
-      await Promise.all([initialization, this.audioContext?.resume()]);
+      await this.prepareAuxiliary();
       if (this.auxiliaryActivity !== activity || !activity.held.has(note) || activity.sounding.has(note)) return;
       this.auxiliary!.output.gain.value = 1;
       this.auxiliary!.synth.noteOn(0, note, 95);

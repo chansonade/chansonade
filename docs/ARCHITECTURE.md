@@ -14,6 +14,8 @@ micro. Le serveur de comptes et de synchronisation est facultatif et indépendan
 | `lib/loop.ts` | Bornes canoniques partagées entre notes, mesures et sélection, avec reprise des anciennes bornes connues. |
 | `lib/TakePanel.svelte`, `lib/take-playback.ts` | Liste des enregistrements et réécoute pilotée par le WAV, avec projection des observations de hauteur sauvegardées. |
 | `lib/PianoKeyboard.svelte` | Clavier partagé par la vue Piano et le clavier compact ; appuis et relâchements souris, tactiles et clavier. |
+| `lib/microphone.ts` | Propriété de l’unique entrée micro : ouverture partagée entre studio, prise et exercices, libération par son propriétaire. |
+| `lib/exercise-session.ts`, `lib/ExercisePlot.svelte` | Passages horodatés, aiguillage des captures, courbes absolues confirmées/provisoires et piano-roll. |
 | `lib/pitch.ts`, `lib/wav.ts` | Session micro, capture, échanges avec le Worker et assemblage du WAV. |
 | `lib/pitch-detector.ts`, `lib/pitch-tracker.ts`, `lib/pitch-worker.ts` | Candidats YIN probabilistes, décision temporelle et exécution dans un Worker. Paramètres communs dans `lib/pitch-config.ts`. |
 | `lib/timeline.ts`, `lib/projection.ts` | Correspondance entre horloge de capture et transport, puis projection de la hauteur mesurée sur les portées. |
@@ -74,6 +76,8 @@ Seul garde seulement l'accord mais conserve toutes les notes attendues et la mê
 durée silencieuse. Aucun MusicXML, ressource de bibliothèque, prise ou protocole
 serveur n'est ajouté.
 
+`AudioPlayer.prepareAuxiliary()` prépare l'instrument et son contexte sans
+commencer de notes, pour ouvrir le micro sur cette même horloge avant l'accord.
 `AudioPlayer.startExercise(passage)` charge ce MIDI dans un séquenceur secondaire,
 sur le synthétiseur auxiliaire déjà utilisé par le piano. Il ne modifie ni le
 séquenceur, ni le tempo, ni le mix de la partition. Le Worklet programme les notes ;
@@ -104,20 +108,60 @@ montés et ses rangées dans la grille : l'overlay Exercices couvre la partition
 son transport sans redimensionner la gravure ni recréer l'élément audio de réécoute.
 Entrer dans la vue ne change pas le transport. Au premier départ d'exercice,
 `App.svelte` met la partition ou le WAV en pause à sa position courante, sans reprise
-automatique au retour. L'analyse micro du studio, y compris un démarrage en attente,
-est arrêtée avant ce son ; aucune activation micro d'exercice n'est encore proposée.
+automatique au retour. Le micro du studio, y compris un démarrage en attente,
+est partagé selon la propriété décrite ci-dessous.
 Une prise réelle bloque l'entrée et les départs.
 
 `ExerciseView.svelte` possède les réglages et les commandes. Écouter joue le motif ;
-Seul garde l'accord et toute la fenêtre silencieuse. Précédent/suivant changent la
+Avec guide joue le même piano et trace la voix ; Seul garde l'accord et toute la
+fenêtre silencieuse, en traçant aussi la voix. Précédent/suivant changent la
 tonique puis rejouent selon la dernière action ; les bornes du domaine rendent les
-pas impossibles indisponibles. Avec guide sera livré avec le retour micro, pour
-avoir une fonction distincte d'Écouter. Le piano-roll montre déjà les notes chantées
-du même calendrier et un curseur lu sur `exerciseState` ; rAF sert uniquement au
-dessin, jamais aux pulsations. Les commandes occupent un pied de vue de hauteur
+pas impossibles indisponibles. Le piano-roll montre les notes chantées du même
+calendrier et un curseur lu sur l'horloge AudioContext du passage ; rAF sert
+uniquement au dessin, jamais aux pulsations. Les commandes occupent un pied de vue de hauteur
 stable ; seul le panneau supérieur défile, y compris en paysage. Espace rejoue,
 les flèches changent la tonalité et Échap arrête, hors champs, dialogues et clavier
-Piano. Langue et thème ne relancent pas le son.
+Piano. Langue et thème ne relancent ni le son ni le micro.
+
+L'application construit une seule instance `PitchInput`. `MicrophoneSession`
+attribue l'ouverture au premier demandeur (studio, prise ou exercices) ; les
+suivants l'empruntent, même si la permission est encore en attente. Une seule
+promesse d'ouverture est partagée, avec le même résultat ou la même erreur.
+Une libération ne ferme que l'entrée dont ce demandeur est propriétaire. Ainsi
+répéter ou changer de tonalité conserve le micro ; sortir, Stop, blur, arrière-plan
+ou changement de compte ferme celui ouvert par les exercices, sans fermer celui
+du studio. Le propriétaire d'une prise est libéré après sa sauvegarde. Le pilote,
+le filtrage secteur, YIN et le décodeur restent identiques.
+
+Écouter ne demande pas le micro et ne trace pas la voix ; il libère une entrée
+ouverte par les exercices mais laisse une entrée du studio intacte. Avec guide
+et Seul ouvrent ou réutilisent le micro avant l'accord. Une permission refusée ou
+annulée empêche le départ sonore ; une réponse tardive ne le relance pas. Après
+la fin naturelle, le micro reste disponible pour répéter et livrer les dernières
+confirmations ; les mesures hors passage ne grossissent pas l'historique.
+
+`ExerciseSession` fige pour chaque départ le passage (tonalité, tempo et mode),
+l'origine `startedAt`, la compensation micro et la correspondance d'horloges.
+Avec le même AudioContext, le décalage vaut exactement zéro. Pour un micro de
+studio déjà ouvert sur un autre contexte, une paire de temps des deux horloges
+en fonctionnement fixe le décalage ; le résultat est projeté à
+`captureTime + offset - latencyMs/1000 - startedAt`. Le temps de réception ne
+participe pas au calcul. Les intervalles de capture de la vue sont conservés
+pour aiguiller les réponses retardées avant toute projection liée à la partition,
+y compris après le retour au studio. Un nouveau passage remplace la courbe ; les
+mesures de l'ancien sont consommées mais n'entrent pas dans le nouveau.
+
+Confirmations et traceback provisoire restent deux listes distinctes. La courbe
+utilise uniquement la fréquence choisie par le décodeur, sans seuil ni correction
+supplémentaire. Les fréquences nulles et les trous de capture interrompent les
+traits ; aucun point provisoire n'est promu par l'interface. À l'arrêt, la dernière
+frontière reste pointillée si le décodeur ne l'a pas confirmée. Tout le passage est
+conservé, sans horizon glissant. `ExercisePlot` partage un seul axe MIDI absolu
+entre notes attendues et mesures, étendu aux hauteurs réellement observées pour
+rendre aussi les octaves fausses visibles ; il ne recale jamais la voix sur une
+note. L'écart numérique en cents utilise la note attendue à l'instant de capture,
+avec le contexte musical figé. Il ne mesure pas la nuance. L'état est annoncé
+au changement de phase ; la lecture numérique continue n'est pas une région live.
 
 Les fonctions de préférences prennent toujours un scope explicite, sous
 `chansonade.exercises.<scope>`, et utilisent `preferences.ts`. Lecture et écriture

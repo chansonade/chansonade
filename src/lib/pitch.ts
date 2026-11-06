@@ -77,6 +77,8 @@ export class PitchInput {
 
   constructor(private readonly callback: (result: PitchResult) => void, private readonly previewCallback: (results: PitchResult[]) => void = () => {}, private readonly onRecordingEnd: (reason: RecordingEndReason) => void = () => {}) {}
 
+  get contextClock(): AudioContext | null { return this.context; }
+
   get active(): boolean {
     return this.running;
   }

@@ -23,7 +23,7 @@ POC web de lecture de partitions, chant et piano. Priorité au fonctionnement et
 ## Détection et essais
 
 - Le WAV conserve l'entrée brute ; seule l'analyse reçoit le filtre secteur. Le détecteur conserve ses candidats YIN, puis un seul décodeur temporel choisit la hauteur ou l'absence de hauteur fiable.
-- Ne pas ajouter de médiane, correction d'octave ou seuil conditionnel après ce décodeur. Ne pas recaler la courbe sur la partition : erreurs de justesse et silences réels doivent rester visibles.
+- Ne pas ajouter de médiane, correction d'octave ou seuil conditionnel après ce décodeur. Ne pas recaler la courbe sur la partition ni sur les notes d’un exercice : erreurs de justesse et silences réels doivent rester visibles.
 - Conserver toute la courbe du passage, sans limite glissante de points. Un retour en arrière ou une nouvelle boucle peut effacer le passage précédent.
 - Le segment pointillé est le traceback provisoire du même décodeur ; il ne figure jamais dans les points confirmés ou la prise sauvegardée. Ne pas avancer artificiellement ses horodatages.
 - Les prises sont isolées par scope dans IndexedDB (`chansonade`, schéma v5, `takeData` et `takeIndex`) et synchronisées automatiquement lorsque le compte est connecté. Protéger les prises réelles lors des vérifications et ne jamais les ajouter aux assets publics.
