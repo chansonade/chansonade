@@ -32,9 +32,11 @@ try {
         </measure>`).join('')}
       </part>
     </score-partwise>`;
+    window.__transportXML = xml;
     let score;
     try { score = await engine.load(xml, 'vertical', 900, 1); }
     finally { engine.destroy(); }
+    window.__transportMIDI = score.musical.midi;
     const audio = new AudioPlayer();
     const button = document.querySelector('#check-audio-start');
     button.onclick = () => {
@@ -98,4 +100,267 @@ try {
   assert(Math.abs(result.loopStart - 3.077) < .02, 'paused loop must start at A');
   assert(result.jumped && Math.abs(result.afterJump - 3.077) < .02, 'loop wrap must return to A');
   console.log('Audio transport: paused seek, resume, pause freeze and loop wrap passed.');
+  // Exercise audio runs on a second sequencer of the existing piano synth.
+  await page.evaluate(async () => {
+    const { AudioPlayer } = await import('/src/lib/audio.ts');
+    const { createExercisePassage, exerciseSecondsAt } = await import('/src/lib/exercises.ts');
+    const check = (condition, message) => { if (!condition) throw new Error(message); };
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const passage = (mode = 'guide', tonic = 60) => createExercisePassage({
+      exerciseId: 'staccato', bpm: 160, step: 1, voice: { low: 48, high: 84, tonic },
+    }, mode);
+    document.querySelector('#check-audio-start').onclick = () => {
+      window.__exerciseCheck = (async () => {
+        const audio = new AudioPlayer();
+        try {
+          await audio.load(window.__transportMIDI);
+          await audio.context.resume();
+          audio.seek(3.077); audio.setRate(1.25);
+          audio.setProgram(0, 73); audio.setTranspose(0, 3); audio.setVolume(0, 47); audio.setMuted(0, true);
+          await sleep(50);
+          const snapshot = () => JSON.stringify({
+            time: audio.time, playing: audio.playing, rate: audio.sequencer.playbackRate,
+            channels: audio.synth.midiChannels.map(channel => ({ ...channel.systemParameters, patch: { ...channel.patch } })),
+          });
+          const before = snapshot();
+          // First piano use initializes exactly the instrument later used by exercises.
+          await audio.pianoNoteOn(84);
+          const instrument = audio.auxiliary;
+          const primary = audio.sequencer;
+          const stampEvents = [];
+          instrument.node.port.addEventListener('message', event => {
+            for (const message of event.data) {
+              if (message.type === 'eventCall' && message.data.type === 'noteOn') {
+                stampEvents.push({ time: message.currentTime, ...message.data.data });
+              }
+            }
+          });
+          // Observe real output inside the audio rendering thread, even while JS is blocked.
+          const code = `class Capture extends AudioWorkletProcessor {
+            process(inputs) {
+              const samples = inputs[0][0];
+              if (samples) {
+                let energy = 0;
+                for (const sample of samples) energy += sample * sample;
+                this.port.postMessage({ time: currentTime, rms: Math.sqrt(energy / samples.length) });
+              }
+              return true;
+            }
+          } registerProcessor('exercise-check-capture', Capture);`;
+          const blob = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+          try { await audio.context.audioWorklet.addModule(blob); }
+          finally { URL.revokeObjectURL(blob); }
+          const capture = () => {
+            const node = new AudioWorkletNode(audio.context, 'exercise-check-capture');
+            const samples = [];
+            node.port.onmessage = event => samples.push(event.data);
+            node.connect(audio.context.destination);
+            return { node, samples };
+          };
+          const voice = capture(), output = capture();
+          instrument.synth.connectChannel(voice.node, 1);
+          instrument.output.connect(output.node);
+
+          // Stall delivery of the start acknowledgement, not the audio renderer.
+          const proto = Object.getPrototypeOf(instrument.sequencer);
+          const timeDescriptor = Object.getOwnPropertyDescriptor(proto, 'currentTime');
+          let stallEnd = 0;
+          Object.defineProperty(instrument.sequencer, 'currentTime', {
+            configurable: true,
+            set(value) {
+              timeDescriptor.set.call(this, value);
+              const end = performance.now() + 1250;
+              while (performance.now() < end) { /* deliberate main-thread stall */ }
+              stallEnd = audio.context.currentTime;
+            },
+            get() { return timeDescriptor.get.call(this); },
+          });
+          let start;
+          try { start = await audio.startExercise(passage()); }
+          finally { delete instrument.sequencer.currentTime; }
+          check(start && stallEnd - start.startedAt > 1, 'origin must be the Worklet clock before the blocked main thread received it');
+          check(audio.auxiliary === instrument && audio.sequencer === primary, 'reuse piano synth and leave score sequencer intact');
+          audio.pianoNoteOff(84); // stale keyboard cleanup must not stop the exercise
+          check(audio.exerciseState.phase === 'playing', 'piano cleanup must not cancel exercise');
+          await sleep(Math.max(0, (start.startedAt + start.duration - audio.context.currentTime) * 1000) + 120);
+          check(audio.exerciseState.phase === 'ended', 'exercise ends at its full calendar duration');
+          const melody = stampEvents.filter(note => note.channel === 1 && note.time >= start.startedAt);
+          const expected = passage().notes.filter(note => note.role === 'voice');
+          check(melody.length === expected.length, 'each guide note sounds exactly once');
+          const offsets = melody.map((note, i) => note.time - start.startedAt - exerciseSecondsAt(passage(), expected[i].startTick));
+          check(offsets.every(offset => Math.abs(offset) < .025), 'Worklet guide tempo stays stable while the main thread is blocked');
+          const audibleOffsets = expected.map(note => {
+            const onset = start.startedAt + exerciseSecondsAt(passage(), note.startTick);
+            const sample = voice.samples.find(sample => sample.time >= onset - .01 && sample.time < onset + .08 && sample.rms > .001);
+            check(sample, 'every scheduled guide note produces an audible onset');
+            check(output.samples.some(sample => sample.time >= onset && sample.time < onset + .08 && sample.rms > .001),
+              'guide must reach the actual auxiliary output, beyond the channel monitor');
+            return sample.time - onset;
+          });
+          check(snapshot() === before, 'exercise must preserve score position, rate, program, transpose, gain and mute');
+
+          // Solo retains the entire silent singing window (no guide events/audio).
+          const solo = await audio.startExercise(passage('solo'));
+          await sleep(1000);
+          check(audio.exerciseState.phase === 'playing', 'solo stays active after its opening chord');
+          await sleep((solo.startedAt + solo.duration - audio.context.currentTime) * 1000 + 100);
+          check(!stampEvents.some(note => note.channel === 1 && note.time >= solo.startedAt), 'solo must not emit guide notes');
+          check(voice.samples.filter(sample => sample.time >= solo.startedAt + .2).every(sample => sample.rms < .00001), 'solo guide channel stays silent');
+          check(audio.exerciseState.phase === 'ended' && audio.exerciseState.time === solo.duration, 'solo does not end with the cue');
+          check(snapshot() === before, 'solo must preserve score settings');
+
+          const first = await audio.startExercise(passage());
+          await sleep(850);
+          const replacement = await audio.startExercise(passage('guide', 62));
+          check(replacement.startedAt > first.startedAt && audio.exerciseState.passage.tonic === 62, 'new passage replaces previous one');
+          await sleep(900);
+          const replacementNotes = stampEvents.filter(note => note.channel === 1 && note.time >= replacement.startedAt);
+          check(replacementNotes.length === 1 && replacementNotes[0].midiNote === 62, 'old exercise must not keep sequencing behind replacement');
+          await audio.pianoNoteOn(79);
+          check(audio.exerciseState.phase === 'idle' && audio.auxiliary === instrument, 'piano preempts exercise on the same synth');
+          await sleep(80);
+          check(stampEvents.some(note => note.midiNote === 79 && note.channel === 0), 'manual piano sounds after exercise');
+          audio.pianoNoteOff(79);
+          await audio.startExercise(passage());
+          check(audio.auxiliaryActivity.kind === 'exercise', 'exercise preempts piano');
+          audio.stopAuxiliary();
+          const stoppedAt = audio.context.currentTime;
+          await sleep(1000);
+          check(audio.exerciseState.phase === 'idle', 'stop clears exercise state');
+          const silence = output.samples.filter(sample => sample.time > stoppedAt + .05);
+          check(silence.length > 100 && silence.every(sample => sample.rms < .00001), 'stop cuts voices and effect tails, with no later audio');
+          check(!stampEvents.some(note => note.time > stoppedAt + .05), 'stopped exercise never emits later notes');
+          check(snapshot() === before, 'stops and piano preemption must preserve score settings');
+
+          // Delay the real songChange acknowledgement. A stopped load stays stopped.
+          const events = instrument.sequencer.eventHandler;
+          const addEvent = events.addEvent.bind(events);
+          let releaseLoad;
+          events.addEvent = (name, id, callback) => addEvent(name, id, name === 'songChange'
+            ? event => { releaseLoad = () => callback(event); } : callback);
+          const late = audio.startExercise(passage());
+          while (!releaseLoad) await sleep(10);
+          audio.stopAuxiliary();
+          events.addEvent = addEvent;
+          const afterLateStop = audio.context.currentTime;
+          releaseLoad();
+          check(await late === null, 'cancelled MIDI load resolves without starting');
+          await sleep(950);
+          check(audio.exerciseState.phase === 'idle', 'late songChange must not revive playback');
+          check(output.samples.filter(sample => sample.time > afterLateStop + .05).every(sample => sample.rms < .00001), 'cancelled load stays silent');
+          check(snapshot() === before, 'late loading leaves score untouched');
+
+          releaseLoad = null;
+          events.addEvent = (name, id, callback) => addEvent(name, id, name === 'songChange'
+            ? event => { releaseLoad = () => callback(event); } : callback);
+          const obsolete = audio.startExercise(passage());
+          while (!releaseLoad) await sleep(10);
+          const newest = audio.startExercise(passage('guide', 64));
+          events.addEvent = addEvent;
+          releaseLoad();
+          check(await obsolete === null, 'replacement cancels a still-loading passage');
+          const newestStart = await newest;
+          await sleep(900);
+          const newestNotes = stampEvents.filter(note => note.channel === 1 && note.time >= newestStart.startedAt);
+          check(newestNotes.length === 1 && newestNotes[0].midiNote === 64, 'late acknowledgement cannot start the superseded passage');
+          audio.stopAuxiliary();
+
+          // A cancelled initialization cannot start either an exercise or an old key.
+          const bank = await audio.loadSoundBank();
+          const cold = new AudioPlayer();
+          let releaseBank, bankRequested;
+          const requested = new Promise(resolve => { bankRequested = resolve; });
+          const bankGate = new Promise(resolve => { releaseBank = resolve; });
+          cold.loadSoundBank = async () => { bankRequested(); await bankGate; return bank.slice(0); };
+          try {
+            const oldKey = cold.pianoNoteOn(81);
+            const initializing = cold.startExercise(passage());
+            await requested;
+            cold.stopAuxiliary();
+            const newKey = cold.pianoNoteOn(76);
+            releaseBank();
+            check(await initializing === null, 'stopped initialization must not start exercise later');
+            await Promise.all([oldKey, newKey]);
+            check(cold.auxiliaryActivity.kind === 'piano' && cold.auxiliaryActivity.sounding.size === 1
+              && cold.auxiliaryActivity.sounding.has(76), 'old delayed piano key cannot join a newer piano session');
+            cold.stopAuxiliary();
+          } finally { releaseBank(); await cold.destroy(); }
+
+          const closing = new AudioPlayer();
+          let closeRelease, closeRequested;
+          const closeGate = new Promise(resolve => { closeRelease = resolve; });
+          const closeReady = new Promise(resolve => { closeRequested = resolve; });
+          closing.loadSoundBank = async () => { closeRequested(); await closeGate; return bank.slice(0); };
+          const closingStart = closing.startExercise(passage());
+          await closeReady;
+          await closing.destroy();
+          closeRelease();
+          check(await closingStart === null && closing.exerciseState.phase === 'idle' && !closing.context,
+            'destroy during initialization must neither recreate a context nor start notes');
+
+          voice.node.disconnect(); output.node.disconnect();
+          return { offsets, audibleOffsets, originDelay: stallEnd - start.startedAt, duration: start.duration, soloDuration: solo.duration };
+        } finally { await audio.destroy(); }
+      })();
+    };
+  });
+  await page.locator('#check-audio-start').click();
+  const exercises = await page.evaluate(() => window.__exerciseCheck);
+  console.log('Exercise audio:', JSON.stringify(exercises));
+  assert.deepEqual(errors, [], 'No unhandled exercise audio errors');
+
+  // Mount the real coordinator in a synthetic page: exercise API has no UI yet.
+  const xml = await page.evaluate(() => window.__transportXML);
+  const lifecycleUrl = url + '-lifecycle';
+  await context.route('**/api/v1/**', route => route.fulfill({ json: { user: null, registration: 'open' } }));
+  await context.route('**/scores/*.musicxml', route => route.fulfill({ contentType: 'application/xml', body: xml }));
+  await context.route(lifecycleUrl, route => route.fulfill({ contentType: 'text/html', body: `<!doctype html>
+    <div id="app"></div><script type="module">
+      import { AudioPlayer } from '/src/lib/audio.ts';
+      import { mount, unmount } from '/node_modules/.vite/deps/svelte.js';
+      import App from '/src/App.svelte';
+      import '/src/style.css';
+      const load = AudioPlayer.prototype.load;
+      AudioPlayer.prototype.load = function (...args) { window.__appAudio = this; return load.apply(this, args); };
+      const app = mount(App, { target: document.getElementById('app') });
+      window.__unmount = () => unmount(app);
+    </script>` }));
+  await page.goto(lifecycleUrl);
+  await page.waitForFunction(() => window.__appAudio?.loaded);
+  await page.evaluate(async () => {
+    const { createExercisePassage } = await import('/src/lib/exercises.ts');
+    window.__startPassage = () => window.__appAudio.startExercise(createExercisePassage({
+      exerciseId: 'hum', bpm: 160, step: 1, voice: { low: 48, high: 84, tonic: 60 },
+    }, 'guide'));
+  });
+  const assertIdle = async label => {
+    await page.waitForFunction(() => window.__appAudio.exerciseState.phase === 'idle');
+    assert.equal(await page.evaluate(() => window.__appAudio.auxiliary.output.gain.value), 0, label);
+  };
+  await page.evaluate(() => window.__startPassage());
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  await assertIdle('blur silences auxiliary');
+  await page.evaluate(() => window.__startPassage());
+  // Headless Chromium has no OS task switcher: exercise the visibility handler.
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    delete document.hidden;
+  });
+  await assertIdle('background silences auxiliary');
+  await page.evaluate(() => window.__startPassage());
+  await page.getByRole('button', { name: 'Piano', exact: true }).click();
+  await assertIdle('view change silences auxiliary');
+  await page.evaluate(() => window.__startPassage());
+  await page.evaluate(async () => (await import('/src/lib/storage.ts')).setStorageScope('user:synthetic-exercise-account'));
+  await assertIdle('scope change silences auxiliary');
+  await page.waitForFunction(() => window.__appAudio.loaded);
+  await page.evaluate(() => window.__startPassage());
+  await page.evaluate(() => window.__unmount());
+  assert.equal(await page.evaluate(() => window.__appAudio.exerciseState.phase), 'idle', 'unmount cancels exercise');
+  await page.waitForFunction(() => window.__appAudio.context === null);
+  assert.deepEqual(errors, [], 'No unhandled initialization/lifecycle errors');
+  console.log('Exercise lifecycle: delayed initialization/loading, replacement, piano exclusivity, blur, background, view, account and unmount passed.');
+
+
 } finally { await context.close(); await browser.close(); }

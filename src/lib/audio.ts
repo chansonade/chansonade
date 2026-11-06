@@ -1,8 +1,78 @@
-import { Sequencer, WorkletSynthesizer } from 'spessasynth_lib';
+import { Sequencer, WorkletSynthesizer, type BasicSynthesizerReturnMessage } from 'spessasynth_lib';
+import { exerciseMIDI, exerciseSecondsAt, type ExercisePassage } from './exercises';
 import processorUrl from 'spessasynth_lib/dist/spessasynth_processor.min.js?url';
 
 const clamp = (value: number, min: number, max: number) =>
   Math.max(min, Math.min(max, Number.isFinite(value) ? value : min));
+
+/** Load acknowledgements are serialized separately for each sequencer. */
+function loadSequence(sequencer: Sequencer, binary: ArrayBuffer, fileName: string) {
+  return new Promise<void>((resolve, reject) => {
+    const id = 'chansonade-load';
+    const cleanup = () => {
+      clearTimeout(timeout);
+      sequencer.eventHandler.removeEvent('songChange', id);
+      sequencer.eventHandler.removeEvent('midiError', id);
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('Le chargement audio a pris trop de temps.'));
+    }, 20_000);
+    sequencer.eventHandler.addEvent('songChange', id, () => { cleanup(); resolve(); });
+    sequencer.eventHandler.addEvent('midiError', id, error => { cleanup(); reject(error); });
+    try { sequencer.loadNewSongList([{ binary, fileName }]); }
+    catch (error) { cleanup(); reject(error); }
+  });
+}
+
+export type ExerciseStart = { readonly startedAt: number; readonly duration: number };
+export type ExerciseState =
+  | { readonly phase: 'idle' }
+  | { readonly phase: 'preparing'; readonly passage: ExercisePassage }
+  | ({ readonly phase: 'playing' | 'ended'; readonly passage: ExercisePassage; readonly time: number } & ExerciseStart);
+type AuxiliaryActivity =
+  | { kind: 'piano'; held: Map<number, number>; sounding: Set<number> }
+  | { kind: 'exercise'; passage: ExercisePassage; cancellation: AbortController; start: ExerciseStart | null };
+type AuxiliaryInstrument = {
+  synth: WorkletSynthesizer;
+  sequencer: Sequencer;
+  node: AudioWorkletNode;
+  output: GainNode;
+};
+
+/** Start acknowledgement uses the processor clock, never main-thread receipt time.
+ * Spessa's public timeChange callback omits this timestamp. Keep its typed wire
+ * adapter here; dependency upgrades must retain the audio-clock regression. */
+function startExerciseSequence(instrument: AuxiliaryInstrument, signal: AbortSignal): Promise<number | null> {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timeout);
+      instrument.node.port.removeEventListener('message', receive);
+      signal.removeEventListener('abort', cancel);
+    };
+    const cancel = () => { cleanup(); resolve(null); };
+    const receive = (event: MessageEvent<BasicSynthesizerReturnMessage[]>) => {
+      for (const message of event.data) {
+        if (message.type !== 'sequencerReturn' || message.data.type !== 'timeChange') continue;
+        cleanup();
+        resolve(message.currentTime - message.data.data.newTime);
+        return;
+      }
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('Le chargement audio a pris trop de temps.'));
+    }, 20_000);
+    if (signal.aborted) { cancel(); return; }
+    instrument.node.port.addEventListener('message', receive);
+    signal.addEventListener('abort', cancel, { once: true });
+    // Like score playback, seek after unpausing to avoid Spessa's paused snap.
+    try {
+      instrument.sequencer.play();
+      instrument.sequencer.currentTime = 0;
+    } catch (error) { cleanup(); reject(error); }
+  });
+}
 
 /** A small, browser-local player. Times are seconds in the original MIDI. */
 export class AudioPlayer {
@@ -11,10 +81,10 @@ export class AudioPlayer {
   private sequencer: Sequencer | null = null;
   private initialization: Promise<void> | null = null;
   private soundBank: Promise<ArrayBuffer> | null = null;
-  private pianoSynth: WorkletSynthesizer | null = null;
-  private pianoInitialization: Promise<void> | null = null;
-  private pianoHeld = new Map<number, number>();
-  private pianoSounding = new Set<number>();
+  private auxiliary: AuxiliaryInstrument | null = null;
+  private auxiliaryInitialization: Promise<void> | null = null;
+  private auxiliaryActivity: AuxiliaryActivity | null = null;
+  private auxiliaryQueue: Promise<void> = Promise.resolve();
   private loadQueue: Promise<void> = Promise.resolve();
   private loadGeneration = 0;
   private loaded = false;
@@ -68,13 +138,14 @@ export class AudioPlayer {
           throw new Error('Le moteur audio nécessite HTTPS ou localhost et un navigateur récent.');
         }
         await context.audioWorklet.addModule(processorUrl);
+        if (this.destroyed) throw new Error('Le lecteur audio a été fermé.');
         const synth = new WorkletSynthesizer(context);
         this.synth = synth;
         synth.setLogLevel(false, true, false);
         synth.connect(context.destination);
         await synth.isReady;
         if (this.destroyed) throw new Error('Le lecteur audio a été fermé.');
-        // addSoundBank transfers its buffer; retain the original for the piano.
+        // addSoundBank transfers its buffer; retain the original for the auxiliary instrument.
         const soundBank = await this.loadSoundBank();
         if (this.destroyed) throw new Error('Le lecteur audio a été fermé.');
         await synth.soundBankManager.addSoundBank(soundBank.slice(0), 'chansonade');
@@ -130,32 +201,7 @@ export class AudioPlayer {
         channel.setSystemParameter('keyShift', 0);
       }
       const bytes = Uint8Array.from(atob(midiBase64), (c) => c.charCodeAt(0));
-      await new Promise<void>((resolve, reject) => {
-        const id = `chansonade-load-${generation}`;
-        const cleanup = () => {
-          clearTimeout(timeout);
-          sequencer.eventHandler.removeEvent('songChange', id);
-          sequencer.eventHandler.removeEvent('midiError', id);
-        };
-        const timeout = setTimeout(() => {
-          cleanup();
-          reject(new Error('Le chargement audio a pris trop de temps.'));
-        }, 20_000);
-        sequencer.eventHandler.addEvent('songChange', id, () => {
-          cleanup();
-          resolve();
-        });
-        sequencer.eventHandler.addEvent('midiError', id, (error) => {
-          cleanup();
-          reject(error);
-        });
-        try {
-          sequencer.loadNewSongList([{ binary: bytes.buffer, fileName: 'partition.mid' }]);
-        } catch (error) {
-          cleanup();
-          reject(error);
-        }
-      });
+      await loadSequence(sequencer, bytes.buffer, 'partition.mid');
       if (generation !== this.loadGeneration || this.destroyed) return;
       sequencer.loopCount = 0;
       sequencer.playbackRate = this.requestedRate;
@@ -283,65 +329,133 @@ export class AudioPlayer {
     this.synth?.midiChannels[channel]?.setSystemParameter('keyShift', Math.round(clamp(semitones, -48, 48)));
   }
 
-  private async initializePiano() {
+  private async initializeAuxiliary() {
     if (this.destroyed) throw new Error('Le lecteur audio a été fermé.');
-    if (!this.pianoInitialization) {
-      this.pianoInitialization = (async () => {
+    if (!this.auxiliaryInitialization) {
+      this.auxiliaryInitialization = (async () => {
         await this.initialize();
         if (this.destroyed) throw new Error('Le lecteur audio a été fermé.');
-        const synth = new WorkletSynthesizer(this.audioContext!);
-        this.pianoSynth = synth;
+        const context = this.audioContext!;
+        let node!: AudioWorkletNode;
+        const synth = new WorkletSynthesizer(context, {
+          audioNodeCreators: { worklet: (ctx, name, options) => {
+            node = new AudioWorkletNode(ctx, name, options);
+            return node;
+          } },
+        });
+        const output = context.createGain();
+        output.gain.value = 0;
+        output.connect(context.destination);
+        synth.connect(output);
         synth.setLogLevel(false, true, false);
-        synth.connect(this.audioContext!.destination);
+        const sequencer = new Sequencer(synth, { skipToFirstNoteOn: false });
+        sequencer.loopCount = 0;
+        this.auxiliary = { synth, sequencer, node, output };
         await synth.isReady;
         if (this.destroyed) throw new Error('Le lecteur audio a été fermé.');
         const soundBank = await this.loadSoundBank();
         if (this.destroyed) throw new Error('Le lecteur audio a été fermé.');
-        await synth.soundBankManager.addSoundBank(soundBank.slice(0), 'chansonade-piano');
+        await synth.soundBankManager.addSoundBank(soundBank.slice(0), 'chansonade-auxiliary');
         if (this.destroyed) throw new Error('Le lecteur audio a été fermé.');
         synth.programChange(0, 0);
         synth.setSystemParameter('gain', 0.65);
       })().catch((error) => {
-        this.pianoSynth?.destroy();
-        this.pianoSynth = null;
-        this.pianoInitialization = null;
-        this.pianoHeld.clear();
-        this.pianoSounding.clear();
+        this.auxiliary?.synth.destroy();
+        this.auxiliary?.output.disconnect();
+        this.auxiliary = null;
+        this.auxiliaryInitialization = null;
         throw error;
       });
     }
-    await this.pianoInitialization;
+    await this.auxiliaryInitialization;
+  }
+
+  get exerciseState(): ExerciseState {
+    const activity = this.auxiliaryActivity;
+    if (activity?.kind !== 'exercise') return { phase: 'idle' };
+    if (!activity.start) return { phase: 'preparing', passage: activity.passage };
+    return {
+      phase: this.auxiliary!.sequencer.isFinished ? 'ended' : 'playing',
+      passage: activity.passage,
+      ...activity.start,
+      time: clamp(this.audioContext!.currentTime - activity.start.startedAt, 0, activity.start.duration),
+    };
+  }
+
+  /** Last request owns the auxiliary instrument. No score transport or mix changes.
+   * startedAt is in AudioContext seconds, on the same clock as microphone capture.
+   * A superseded start resolves null, including initialization and MIDI loading. */
+  async startExercise(passage: ExercisePassage): Promise<ExerciseStart | null> {
+    this.stopAuxiliary();
+    const activity: AuxiliaryActivity = { kind: 'exercise', passage, cancellation: new AbortController(), start: null };
+    this.auxiliaryActivity = activity;
+    try {
+      const initialization = this.initializeAuxiliary();
+      await Promise.all([initialization, this.audioContext?.resume()]);
+      if (this.auxiliaryActivity !== activity) return null;
+      const task = this.auxiliaryQueue.then(async () => {
+        if (this.auxiliaryActivity !== activity) return null;
+        const instrument = this.auxiliary!;
+        await loadSequence(instrument.sequencer, exerciseMIDI(passage), 'exercice.mid');
+        if (this.auxiliaryActivity !== activity) return null;
+        instrument.output.gain.value = 1;
+        const startedAt = await startExerciseSequence(instrument, activity.cancellation.signal);
+        if (startedAt === null || this.auxiliaryActivity !== activity) return null;
+        activity.start = { startedAt, duration: exerciseSecondsAt(passage, passage.durationTicks) };
+        return activity.start;
+      });
+      // Loading acknowledgements stay ordered even when a request is cancelled.
+      this.auxiliaryQueue = task.then(() => {}, () => {});
+      return await task;
+    } catch (error) {
+      if (this.auxiliaryActivity !== activity) return null;
+      this.stopAuxiliary();
+      throw error;
+    }
   }
 
   /** Each source must pair its noteOn with a noteOff, including repeated keys. */
   async pianoNoteOn(midi: number): Promise<void> {
-    if (this.destroyed) throw new Error('Le lecteur audio a été fermé.');
+    if (this.auxiliaryActivity?.kind !== 'piano') {
+      this.stopAuxiliary();
+      this.auxiliaryActivity = { kind: 'piano', held: new Map(), sounding: new Set() };
+    }
+    const activity = this.auxiliaryActivity;
     const note = Math.round(clamp(midi, 0, 127));
-    this.pianoHeld.set(note, (this.pianoHeld.get(note) ?? 0) + 1);
-    const initialization = this.initializePiano();
-    // initialize creates the context synchronously, so resume stays in the gesture.
-    await Promise.all([initialization, this.audioContext?.resume()]);
-    if (!this.destroyed && this.pianoHeld.has(note) && !this.pianoSounding.has(note)) {
-      this.pianoSynth!.noteOn(0, note, 95);
-      this.pianoSounding.add(note);
+    activity.held.set(note, (activity.held.get(note) ?? 0) + 1);
+    try {
+      const initialization = this.initializeAuxiliary();
+      // initialize creates the context synchronously, so resume stays in the gesture.
+      await Promise.all([initialization, this.audioContext?.resume()]);
+      if (this.auxiliaryActivity !== activity || !activity.held.has(note) || activity.sounding.has(note)) return;
+      this.auxiliary!.output.gain.value = 1;
+      this.auxiliary!.synth.noteOn(0, note, 95);
+      activity.sounding.add(note);
+    } catch (error) {
+      if (this.auxiliaryActivity !== activity) return;
+      this.stopAuxiliary();
+      throw error;
     }
   }
 
   pianoNoteOff(midi: number): void {
+    const activity = this.auxiliaryActivity;
+    if (activity?.kind !== 'piano') return;
     const note = Math.round(clamp(midi, 0, 127));
-    const held = this.pianoHeld.get(note) ?? 0;
-    if (held > 1) {
-      this.pianoHeld.set(note, held - 1);
-      return;
-    }
-    this.pianoHeld.delete(note);
-    if (this.pianoSounding.delete(note)) this.pianoSynth?.noteOff(0, note);
+    const held = activity.held.get(note) ?? 0;
+    if (held > 1) { activity.held.set(note, held - 1); return; }
+    activity.held.delete(note);
+    if (activity.sounding.delete(note)) this.auxiliary?.synth.noteOff(0, note);
   }
 
-  stopPiano(): void {
-    this.pianoHeld.clear();
-    this.pianoSounding.clear();
-    this.pianoSynth?.stopAll(true);
+  stopAuxiliary(): void {
+    const activity = this.auxiliaryActivity;
+    this.auxiliaryActivity = null;
+    if (activity?.kind === 'exercise') activity.cancellation.abort();
+    this.auxiliary?.sequencer.pause();
+    this.auxiliary?.synth.stopAll(true);
+    // Cut effect tails as well as voices; late initialization never opens output.
+    if (this.auxiliary) this.auxiliary.output.gain.value = 0;
   }
 
   async previewNote(channel: number, pitch: number) {
@@ -368,10 +482,11 @@ export class AudioPlayer {
     ++this.loadGeneration;
     this.loaded = false;
     this.loop = null;
-    this.stopPiano();
+    this.stopAuxiliary();
     this.pause();
-    this.pianoSynth?.destroy();
-    this.pianoSynth = null;
+    this.auxiliary?.synth.destroy();
+    this.auxiliary?.output.disconnect();
+    this.auxiliary = null;
     this.synth?.destroy();
     this.synth = null;
     this.sequencer = null;

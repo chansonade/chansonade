@@ -10,7 +10,7 @@ micro. Le serveur de comptes et de synchronisation est facultatif et indépendan
 | --- | --- |
 | `App.svelte` | État de l'interface, ouverture des morceaux, transport, mixage, vues et cycle d'une prise. |
 | `lib/score.ts`, `lib/score-worker.ts` | Import MXL, métadonnées, gravure Verovio dans un Worker, MIDI et repères musicaux ; indexation de la géométrie SVG. |
-| `lib/audio.ts` | AudioContext, banque SoundFont et transport SpessaSynth ; synthétiseur distinct pour le piano manuel. |
+| `lib/audio.ts` | AudioContext, banque SoundFont et transport SpessaSynth ; instrument auxiliaire partagé par piano et exercices. |
 | `lib/loop.ts` | Bornes canoniques partagées entre notes, mesures et sélection, avec reprise des anciennes bornes connues. |
 | `lib/TakePanel.svelte`, `lib/take-playback.ts` | Liste des enregistrements et réécoute pilotée par le WAV, avec projection des observations de hauteur sauvegardées. |
 | `lib/PianoKeyboard.svelte` | Clavier partagé par la vue Piano et le clavier compact ; appuis et relâchements souris, tactiles et clavier. |
@@ -39,13 +39,13 @@ En mode Auto, le téléphone affiche la partition en portrait et le ruban immers
 en paysage. Un choix manuel prend priorité. Changer de vue, de taille ou de thème
 doit préserver le transport et les réglages. La transposition concerne l'audio et
 la hauteur attendue ; elle ne modifie pas les notes gravées. Le piano manuel garde
-sa hauteur réelle et son propre instrument sur le même AudioContext.
+sa hauteur réelle et partage avec les exercices un instrument auxiliaire sur
+le même AudioContext, distinct du synthétiseur de la partition.
 
 ## Modèle des exercices
 
-`exercises.ts` fournit le domaine de la future vue dédiée, sans connexion à
-l'interface ni au lecteur à cette étape. Les sept motifs majeurs décrivent leurs
-degrés, durées en pulsations, syllabes (paroles non traduites) et articulation.
+`exercises.ts` fournit le domaine de la vue dédiée. Les sept motifs majeurs
+décrivent leurs degrés, durées en pulsations, syllabes (paroles non traduites) et articulation.
 Un accord de tonique à l'octave inférieure dure une pulsation, suivi d'une
 pulsation de silence. Les tessitures proposées sont indicatives et éditables ;
 leurs bornes réelles sont l'unique valeur conservée, sans catégorie de voix doublée.
@@ -62,15 +62,40 @@ bouclage ni correction silencieuse ; la compilation refuse une tonique incorrect
 
 `createExercisePassage` produit un instantané indépendant des préférences : notes
 MIDI absolues, syllabes, rôles accord/voix et offsets en ticks (480 par pulsation).
-Ce calendrier est commun au futur son et au dessin. `exerciseSecondsAt` utilise
+Ce calendrier est commun au son et au dessin. `exerciseSecondsAt` utilise
 le même tempo entier en microsecondes que `exerciseMIDI`, y compris aux BPM non
 exactement représentables. Le MIDI SMF type 0 est généré uniquement en mémoire,
 avec piano sur les canaux 0 (accord) et 1 (guide), des note-off explicites et la
 fin du passage après son dernier créneau. Un All Notes Off terminal conserve
-cette durée pour Spessa, qui ignore la fin de piste seule pour calculer sa durée. Écouter et Avec guide ont le même son ;
+cette durée pour Spessa, qui ignore la fin de piste seule pour calculer sa durée.
+Écouter et Avec guide ont le même son ;
 Seul garde seulement l'accord mais conserve toutes les notes attendues et la même
 durée silencieuse. Aucun MusicXML, ressource de bibliothèque, prise ou protocole
 serveur n'est ajouté.
+
+`AudioPlayer.startExercise(passage)` charge ce MIDI dans un séquenceur secondaire,
+sur le synthétiseur auxiliaire déjà utilisé par le piano. Il ne modifie ni le
+séquenceur, ni le tempo, ni le mix de la partition. Le Worklet programme les notes ;
+aucun timer d'interface ne donne la pulsation. Le démarrage renvoie
+`{startedAt, duration}` en secondes AudioContext : `startedAt` est l'origine du
+calendrier pour l'affichage et le micro, pas l'heure de réception sur le thread
+principal. Un adaptateur typé, confiné à `audio.ts`, lit l'horodatage des messages
+Spessa `timeChange` que son callback public ne transmet pas. La régression audio
+vérifie cette origine avec le thread principal bloqué ; une mise à jour Spessa
+doit préserver ce contrat. `exerciseState` expose préparation, lecture, fin et
+temps écoulé ; `stopAuxiliary()` arrête le séquenceur, relâche toutes les notes
+et coupe aussi les queues d'effets.
+
+La dernière demande prend cet instrument : un exercice relâche le piano ; une
+nouvelle note manuelle arrête l'exercice. Le relâchement tardif d'une touche ne
+coupe pas l'exercice suivant. Les chargements MIDI sont sérialisés séparément
+de ceux de la partition ; une demande remplacée ou arrêtée renvoie `null` et ne
+peut pas démarrer après une initialisation ou un acquittement tardif. Les sorties
+restent fermées jusqu'à un départ encore valide. Le blur, le passage en
+arrière-plan, le changement de vue ou de compte et le démontage arrêtent cet
+instrument ; la partition et une capture réelle ne sont pas arrêtées par ces
+événements de focus. L'interface Exercices n'est pas encore exposée ; sa future
+commande de départ devra mettre le studio en pause, sans reprise automatique.
 
 Les fonctions de préférences prennent toujours un scope explicite, sous
 `chansonade.exercises.<scope>`, et utilisent `preferences.ts`. Lecture et écriture

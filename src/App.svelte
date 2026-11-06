@@ -298,6 +298,7 @@
   function chooseScore(source: ScoreSource): Promise<void> {
     // The request itself is the generation: reserve it before the first await,
     // including a deferred account switch or the initial library lookup.
+    audio.stopAuxiliary();
     const request = { scope: storageScope(), source };
     if (source.kind !== 'library') libraryOpen = false;
     opening = request;
@@ -375,7 +376,7 @@
     cancelTakePreparation();
     if (takeCapture) yield* openingWait(finishTake());
     yield* openingWait(savePractice());
-    audio.pause(); audio.stopPiano(); playing = false;
+    audio.pause(); audio.stopAuxiliary(); playing = false;
     const { xml, id, info } = document;
     if (source.kind === 'take' && currentXML === xml) return;
     audioReady = false;
@@ -621,6 +622,11 @@
     smoothedY = viewport?.scrollTop || 0;
     if (value) updateVisual(position, 0.016, !playing);
   }
+  $effect(() => {
+    // Read the effective view, including automatic portrait/landscape changes.
+    void (pianoMode ? 'piano' : mode);
+    untrack(() => audio.stopAuxiliary());
+  });
   function chooseMode(value: 'auto' | ViewMode) { pianoMode = false; preference = value; showControls(); }
   function choosePiano() { pianoMode = true; keyboardOpen = false; showControls(); }
   function playPiano(midi: number) { void audio.pianoNoteOn(midi).catch((cause) => notify(cause instanceof Error ? cause.message : 'Le piano est indisponible.')); }
@@ -982,7 +988,7 @@
   function clearAccountDocument(scope: string) {
     // Clear the previous account before any storage, network or engraving wait.
     stopReplay(); showTake(null);
-    audio.pause(); audio.stopPiano(); playing = false; audioReady = false;
+    audio.pause(); audio.stopAuxiliary(); playing = false; audioReady = false;
     position = 0; duration = 0; rate = 1; targetChannel = 0; loopA = null; loopB = null; loopEnabled = false; selection = null;
     music = null; pages = []; geometry = null; currentXML = ''; currentId = '';
     title = 'Ouvrir une partition'; composer = ''; subtitle = '';
@@ -1008,6 +1014,10 @@
     const beforeUnload = (event: BeforeUnloadEvent) => {
       if (takePhase !== 'idle' || memoryTakes.length) { event.preventDefault(); event.returnValue = ''; }
     };
+    const stopAuxiliary = () => audio.stopAuxiliary();
+    const visibilityChanged = () => { if (document.hidden) stopAuxiliary(); };
+    window.addEventListener('blur', stopAuxiliary);
+    document.addEventListener('visibilitychange', visibilityChanged);
     window.addEventListener('beforeunload', beforeUnload);
     void refreshMicrophones();
     const devicesChanged = () => void refreshMicrophones();
@@ -1055,6 +1065,9 @@
     if (import.meta.env.PROD && 'serviceWorker' in navigator) void navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL }).catch(() => {});
     return () => {
       disposed = true;
+      stopAuxiliary();
+      window.removeEventListener('blur', stopAuxiliary);
+      document.removeEventListener('visibilitychange', visibilityChanged);
       cancelLibraryAddition();
       stopSync(); stopStorage();
       cancelTakePreparation();
