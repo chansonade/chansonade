@@ -5,8 +5,9 @@
   import { AudioPlayer } from './lib/audio';
   import PianoKeyboard from './lib/PianoKeyboard.svelte';
   import ExerciseView from './lib/ExerciseView.svelte';
+  import MicrophoneControls from './lib/MicrophoneControls.svelte';
   import { ExerciseSession } from './lib/exercise-session';
-  import { MicrophoneSession } from './lib/microphone';
+  import { MicrophoneSession, readMicrophoneConfig, writeMicrophoneConfig } from './lib/microphone';
   import type { ExercisePassage } from './lib/exercises';
   import AccountPanel from './lib/AccountPanel.svelte';
   import ThemeToggle from './lib/ThemeToggle.svelte';
@@ -23,7 +24,7 @@
   import { projectOrganization, type Organization } from './lib/organization';
   import { measuresInLoop, canonicalLoopBounds } from './lib/loop';
   import { syncState, startSync, setTakeSyncPaused } from './lib/sync';
-  import { PitchInput, type MicrophoneState, type PitchResult, type RecordingEndReason } from './lib/pitch';
+  import { PitchInput, type MicrophoneState, type MicrophoneConfig, type MicrophoneInfo, type PitchResult, type RecordingEndReason } from './lib/pitch';
   import { projectPitchTrace, type PitchSample } from './lib/projection';
   import { CaptureTimeline } from './lib/timeline';
   import { finishCapturedTake, takeArchive, TakeMetadataBudget, type TakeCapture } from './lib/take-session';
@@ -122,9 +123,9 @@
   let microphoneState = $state<MicrophoneState>('idle');
   const micActive = $derived(microphoneState === 'active');
   const micBusy = $derived(microphoneState === 'starting');
-  let microphoneId = $state(readPreference('chansonade.microphone') || '');
+  let microphoneConfig = $state(readMicrophoneConfig());
   let microphones = $state<MediaDeviceInfo[]>([]);
-  let microphoneLabel = $state('');
+  let microphoneInfo = $state.raw<MicrophoneInfo | null>(null);
   let pitchResult = $state<PitchResult | null>(null);
   let latency = $state(0);
   let pitchSamples = $state<PitchSample[]>([]);
@@ -650,7 +651,7 @@
     else audio.pause();
     playing = false;
     observeTransport();
-    await exercise.start(passage, { deviceId: microphoneId, latencyMs: latency });
+    await exercise.start(passage, { input: microphoneConfig, latencyMs: latency });
   }
   function stopMicrophone() {
     micSession.stop(); pitchResult = null; pitchError = null;
@@ -754,7 +755,7 @@
     if (takeCapture) { await finishTake(); return; }
     if (micSession.active || micSession.starting) { stopMicrophone(); return; }
     try {
-      if (!await micSession.acquire('studio', audio.context || undefined, microphoneId)) return;
+      if (!await micSession.acquire('studio', microphoneConfig, audio.context || undefined)) return;
       traceSince = 0;
       await refreshMicrophones();
       notify('Micro actif. Un casque aide à isoler votre voix.');
@@ -763,16 +764,22 @@
   async function refreshMicrophones() {
     try { microphones = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === 'audioinput' && device.deviceId !== 'default' && device.deviceId !== 'communications'); }
     catch { microphones = []; }
-    microphoneLabel = pitch.inputInfo?.label || '';
   }
-  async function changeMicrophone(deviceId: string) {
-    microphoneId = deviceId;
-    writePreference('chansonade.microphone', deviceId);
+  async function changeMicrophone(config: MicrophoneConfig) {
+    if (micBusy || takePhase !== 'idle') return;
+    microphoneConfig = config;
+    writeMicrophoneConfig(config);
     const owner = micSession.owner;
     if (!owner) return;
+    // A new capture must not join the old passage or its provisional frontier.
+    if (workspace === 'exercises') exercise?.leave();
     stopMicrophone();
-    try { if (await micSession.acquire(owner, audio.context || undefined, microphoneId)) traceSince = 0; }
-    catch (cause) { notify(cause instanceof Error ? cause.message : 'Le microphone est indisponible.'); }
+    try {
+      if (!await micSession.acquire(owner, config, audio.context || undefined)) return;
+      traceSince = 0;
+      if (workspace === 'exercises') exercise?.enter();
+      await refreshMicrophones();
+    } catch (cause) { notify(cause instanceof Error ? cause.message : 'Le microphone est indisponible.'); }
   }
   function addTakeMetadata(kind: 'pitch' | 'transport', point: TakePitch | TakeTransport) {
     const capture = takeCapture;
@@ -902,14 +909,19 @@
     if (audio.time >= duration - 0.05) restart();
     try {
       await audio.context?.resume();
-      const ready = await micSession.acquire('take', audio.context || undefined, microphoneId);
+      const ready = await micSession.acquire('take', microphoneConfig, audio.context || undefined);
       if (request !== takeRequest) return;
       if (!ready) throw new Error('Le micro a été arrêté.');
       await refreshMicrophones();
       if (request !== takeRequest) return;
       setFollow(true);
       clearPitchTrace();
-      const draft: TakeCapture = { scope, startedAt: pitch.currentTime, createdAt: Date.now(), scoreId: currentId, title, scoreXML: currentXML, settings: JSON.parse(JSON.stringify({ rate, loopA, loopB, loopEnabled, target: targetChannel, parts })), latencyMs: latency, pitches: [], transport: [] };
+      const draft: TakeCapture = {
+        scope, startedAt: pitch.currentTime, createdAt: Date.now(),
+        scoreId: currentId, title, scoreXML: currentXML, input: pitch.inputInfo,
+        settings: JSON.parse(JSON.stringify({ rate, loopA, loopB, loopEnabled, target: targetChannel, parts })),
+        latencyMs: latency, pitches: [], transport: [],
+      };
       const budget = new TakeMetadataBudget(draft);
       if (!budget.fits) throw new Error('La partition est trop volumineuse pour enregistrer un essai.');
       const start = await pitch.startRecording();
@@ -1043,7 +1055,10 @@
     engine = new Score();
     pitch = new PitchInput(receivePitch, receivePreview, recordingEnded);
     micSession = new MicrophoneSession(pitch);
-    const stopObservingMicrophone = micSession.subscribe(state => { microphoneState = state; });
+    const stopObservingMicrophone = micSession.subscribe(state => {
+      microphoneState = state;
+      microphoneInfo = state === 'active' ? pitch.inputInfo : null;
+    });
     exercise = new ExerciseSession(audio, micSession);
     const beforeUnload = (event: BeforeUnloadEvent) => {
       if (takePhase !== 'idle' || memoryTakes.length) { event.preventDefault(); event.returnValue = ''; }
@@ -1121,6 +1136,16 @@
     };
   });
 </script>
+
+{#snippet microphoneControls()}
+  <MicrophoneControls
+    config={microphoneConfig}
+    info={microphoneInfo}
+    devices={microphones}
+    disabled={micBusy || takePhase !== 'idle'}
+    onchange={changeMicrophone}
+  />
+{/snippet}
 
 <svelte:window onpointerup={() => drag = null} />
 
@@ -1941,6 +1966,7 @@
             scope={libraryScope}
             blocked={takePhase !== 'idle'}
             onplay={startExercise}
+            {microphoneControls}
           />
         {/key}
       {/if}
@@ -2073,27 +2099,9 @@
             ><Mic size={15} />
           </div
           ><p
-          >{$t("La courbe suit votre voix. Sa fin en pointillés réagit immédiatement puis devient pleine après confirmation. Utilisez un casque pour isoler votre voix.")}</p
-          ><label for="microphone">{$t("Entrée microphone")}</label
-          ><select
-            id="microphone"
-            value={microphoneId}
-            onchange={(event) => void changeMicrophone(event.currentTarget.value)}
-            disabled={micBusy || takePhase !== 'idle'}
-          >
-            <option value="">{$t("Par défaut du système")}</option>
-            {#each microphones as device}
-              <option value={device.deviceId}
-              >{device.label || $t('Microphone {number}', {number: microphones.indexOf(device) + 1})}</option>
-            {/each}
-          </select
-          >{#if micActive && microphoneLabel}
-            <p class="microphone-source">
-              {$t('Entrée active : {name}.', {name: microphoneLabel})}{#if /noise|cancel|rnnoise/i.test(microphoneLabel)}
-                {$t("La réduction de bruit peut couper du chant. Essayez l’entrée physique pour comparer.")}
-              {/if}
-            </p>
-          {/if}<label for="latency">
+          >{$t("La courbe suit votre voix. Sa fin en pointillés réagit immédiatement puis devient pleine après confirmation.")}</p
+          >{@render microphoneControls()}
+          <label for="latency">
             {$t("Décalage micro")}
             <strong>{latency} ms</strong>
           </label

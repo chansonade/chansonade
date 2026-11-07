@@ -7,6 +7,7 @@ import { saveTake, type PracticeSettings, type RecordedTake, type TakePitch, typ
 export type TakeCapture = {
   scope: string; startedAt: number; createdAt: number;
   scoreId: string; title: string; scoreXML: string; settings: PracticeSettings;
+  input: RecordedTake['input'];
   latencyMs: number; pitches: TakePitch[]; transport: TakeTransport[]; metadataLimitReached?: boolean;
 };
 
@@ -45,7 +46,7 @@ export async function finishCapturedTake(pitch: PitchInput, captured: TakeCaptur
     id: crypto.randomUUID(), createdAt: captured.createdAt, title: captured.title,
     scoreId: captured.scoreId, scoreXML: captured.scoreXML, audio: recording.audio,
     duration: recording.duration, sampleRate: recording.sampleRate, samples: recording.samples,
-    input: pitch.inputInfo, captureStartedAt: captured.startedAt, settings: captured.settings,
+    input: captured.input, captureStartedAt: captured.startedAt, settings: captured.settings,
     latencyMs: captured.latencyMs, detector: { ...PITCH_CONFIG }, analysisComplete: recording.analysisComplete && !captured.metadataLimitReached,
     pitches: captured.pitches.filter(point => point.time <= recording.duration),
     transport: captured.transport.filter(point => point.time <= recording.duration),

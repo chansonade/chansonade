@@ -22,7 +22,7 @@ POC web de lecture de partitions, chant et piano. Priorité au fonctionnement et
 
 ## Détection et essais
 
-- Le WAV conserve l'entrée brute ; seule l'analyse reçoit le filtre secteur. Le détecteur conserve ses candidats YIN, puis un seul décodeur temporel choisit la hauteur ou l'absence de hauteur fiable.
+- Le WAV conserve l'entrée brute, sauf l'annulation d'écho du navigateur choisie par l'utilisateur ; seule l'analyse reçoit le filtre secteur. Le détecteur conserve ses candidats YIN, puis un seul décodeur temporel choisit la hauteur ou l'absence de hauteur fiable.
 - Ne pas ajouter de médiane, correction d'octave ou seuil conditionnel après ce décodeur. Ne pas recaler la courbe sur la partition ni sur les notes d’un exercice : erreurs de justesse et silences réels doivent rester visibles.
 - Conserver toute la courbe du passage, sans limite glissante de points. Un retour en arrière ou une nouvelle boucle peut effacer le passage précédent.
 - Le segment pointillé est le traceback provisoire du même décodeur ; il ne figure jamais dans les points confirmés ou la prise sauvegardée. Ne pas avancer artificiellement ses horodatages.

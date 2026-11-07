@@ -1,6 +1,16 @@
 // French source text is the stable key. Musical titles, lyrics and user data
 // remain unchanged; named placeholders are interpolated by the i18n runtime.
 const messages: readonly [string, string, string, string][] = [
+  ["Réglages du microphone", "Microphone settings", "Mikrofoneinstellungen", "Microfooninstellingen"],
+  ["Annulation d’écho (sans casque)", "Echo cancellation (without headphones)", "Echounterdrückung (ohne Kopfhörer)", "Echo-onderdrukking (zonder hoofdtelefoon)"],
+  ["Sans casque, essayez cette option. À l’unisson du guide, elle peut atténuer votre voix et trouer la courbe. Un casque reste préférable.", "Without headphones, try this option. Singing in unison with the guide may also be suppressed, leaving gaps in the trace. Headphones remain preferable.", "Probiere diese Option ohne Kopfhörer. Beim Mitsingen im Einklang mit der Begleitung kann auch deine Stimme gedämpft werden und Lücken in der Kurve hinterlassen. Kopfhörer bleiben die bessere Wahl.", "Probeer deze optie zonder hoofdtelefoon. Als je in unisono met de begeleiding zingt, kan ook je stem worden onderdrukt en kunnen er gaten in de curve ontstaan. Een hoofdtelefoon blijft de beste keuze."],
+  ["Annulation d’écho active.", "Echo cancellation is on.", "Echounterdrückung ist aktiv.", "Echo-onderdrukking is actief."],
+  ["Annulation d’écho inactive.", "Echo cancellation is off.", "Echounterdrückung ist inaktiv.", "Echo-onderdrukking is uitgeschakeld."],
+  ["Le navigateur n’a pas activé l’annulation d’écho demandée.", "The browser did not enable the requested echo cancellation.", "Der Browser hat die angeforderte Echounterdrückung nicht aktiviert.", "De browser heeft de gevraagde echo-onderdrukking niet ingeschakeld."],
+  ["Le navigateur maintient l’annulation d’écho malgré votre choix.", "The browser keeps echo cancellation on despite your choice.", "Der Browser lässt die Echounterdrückung trotz deiner Auswahl aktiv.", "De browser houdt echo-onderdrukking actief ondanks je keuze."],
+  ["Le navigateur n’indique pas l’état de l’annulation d’écho.", "The browser does not report the echo cancellation status.", "Der Browser meldet den Status der Echounterdrückung nicht.", "De browser meldt de status van echo-onderdrukking niet."],
+  ["Le navigateur n’annule que l’audio distant, pas le guide local.", "The browser only cancels remote audio, not the local guide.", "Der Browser unterdrückt nur entferntes Audio, nicht die lokale Begleitung.", "De browser onderdrukt alleen externe audio, niet de lokale begeleiding."],
+
   ["Accord de départ", "Opening chord", "Anfangsakkord", "Beginakkoord"],
   ["Sans accord, le motif commence immédiatement. En mode Seul, aucun son n’est joué.", "Without the chord, the pattern starts immediately. On your own plays no sound.", "Ohne Akkord beginnt das Motiv sofort. Im Modus Allein wird kein Ton gespielt.", "Zonder akkoord begint het patroon meteen. Bij Zelf zingen wordt geen geluid gespeeld."],
   ["Chantez sans référence sonore.", "Sing without a reference sound.", "Singe ohne Referenzton.", "Zing zonder referentietoon."],
@@ -22,7 +32,7 @@ const messages: readonly [string, string, string, string][] = [
   ["Notes attendues", "Expected notes", "Erwartete Töne", "Verwachte noten"],
   ["Votre voix", "Your voice", "Deine Stimme", "Je stem"],
   ["Décodage provisoire", "Provisional decoding", "Vorläufige Dekodierung", "Voorlopige decodering"],
-  ["Utilisez un casque pour isoler votre voix. La courbe montre aussi les erreurs de hauteur et les silences.", "Use headphones to isolate your voice. The trace also shows pitch errors and silences.", "Nutze Kopfhörer, um deine Stimme zu isolieren. Die Kurve zeigt auch Tonhöhenfehler und Stille.", "Gebruik een hoofdtelefoon om je stem te isoleren. De curve toont ook toonhoogtefouten en stiltes."],
+  ["La courbe montre aussi les erreurs de hauteur et les silences.", "The trace also shows pitch errors and silences.", "Die Kurve zeigt auch Tonhöhenfehler und Stille.", "De curve toont ook toonhoogtefouten en stiltes."],
   ["Écouter : piano seul. Avec guide : chantez avec le piano. Seul : l’accord, puis votre voix.", "Listen: piano only. With guide: sing along with the piano. On your own: the chord, then your voice.", "Anhören: nur Klavier. Mit Begleitung: singe zum Klavier. Allein: der Akkord, dann deine Stimme.", "Luisteren: alleen piano. Met begeleiding: zing met de piano mee. Zelf zingen: het akkoord, dan je stem."],
   ["Studio : {title}", "Studio: {title}", "Studio: {title}", "Studio: {title}"],
   ["Aucune partition ouverte", "No score open", "Keine Partitur geöffnet", "Geen partituur geopend"],
@@ -238,7 +248,7 @@ const messages: readonly [string, string, string, string][] = [
   ["Transposition audio en demi-tons", "Audio transposition in semitones", "Audiotransposition in Halbtönen", "Audiotranspositie in halve tonen"],
   ["Transposer {name} vers le haut", "Transpose {name} up", "{name} nach oben transponieren", "{name} omhoog transponeren"],
   ["RETOUR DE VOIX", "VOICE FEEDBACK", "STIMMRÜCKMELDUNG", "STEMFEEDBACK"],
-  ["La courbe suit votre voix. Sa fin en pointillés réagit immédiatement puis devient pleine après confirmation. Utilisez un casque pour isoler votre voix.", "The trace follows your voice. Its dotted end reacts immediately, then becomes solid once confirmed. Use headphones to isolate your voice.", "Die Kurve folgt deiner Stimme. Ihr gepunktetes Ende reagiert sofort und wird nach der Bestätigung durchgezogen. Nutze Kopfhörer, um deine Stimme zu isolieren.", "De curve volgt je stem. Het gestippelde uiteinde reageert direct en wordt na bevestiging een doorgetrokken lijn. Gebruik een hoofdtelefoon om je stem te isoleren."],
+  ["La courbe suit votre voix. Sa fin en pointillés réagit immédiatement puis devient pleine après confirmation.", "The trace follows your voice. Its dotted end reacts immediately, then becomes solid once confirmed.", "Die Kurve folgt deiner Stimme. Ihr gepunktetes Ende reagiert sofort und wird nach der Bestätigung durchgezogen.", "De curve volgt je stem. Het gestippelde uiteinde reageert direct en wordt na bevestiging een doorgetrokken lijn."],
   ["Entrée microphone", "Microphone input", "Mikrofoneingang", "Microfooningang"],
   ["Par défaut du système", "System default", "Systemstandard", "Systeemstandaard"],
   ["Microphone {number}", "Microphone {number}", "Mikrofon {number}", "Microfoon {number}"],

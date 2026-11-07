@@ -1,4 +1,14 @@
-import type { PitchInput, MicrophoneState } from './pitch';
+import { readPreference, writePreference } from './preferences';
+import type { PitchInput, MicrophoneState, MicrophoneConfig } from './pitch';
+
+/** These input choices belong to the device, independently of the account. */
+export function readMicrophoneConfig(): MicrophoneConfig {
+  return { deviceId: readPreference('chansonade.microphone') || '', echoCancellation: readPreference('chansonade.echo-cancellation') === 'true' };
+}
+export function writeMicrophoneConfig(config: MicrophoneConfig): void {
+  writePreference('chansonade.microphone', config.deviceId);
+  writePreference('chansonade.echo-cancellation', String(config.echoCancellation));
+}
 
 export type MicrophoneOwner = 'studio' | 'take' | 'exercises';
 type Lease = { owner: MicrophoneOwner; ready: Promise<boolean> };
@@ -13,9 +23,9 @@ export class MicrophoneSession {
   subscribe(listener: (state: MicrophoneState) => void) { return this.input.subscribeState(listener); }
   get context() { return this.input.contextClock; }
 
-  acquire(owner: MicrophoneOwner, context: AudioContext | undefined, deviceId: string): Promise<boolean> {
+  acquire(owner: MicrophoneOwner, config: MicrophoneConfig, context?: AudioContext): Promise<boolean> {
     if (this.lease && this.input.state !== 'idle') return this.lease.ready;
-    const started = this.input.start(context, deviceId);
+    const started = this.input.start(config, context);
     const lease: Lease = { owner, ready: started.then(() => this.lease === lease && this.input.active, error => {
       if (this.lease !== lease) return false;
       this.stop();

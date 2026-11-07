@@ -1,7 +1,7 @@
 import type { AudioPlayer, ExerciseStart } from './audio';
 import { exerciseSecondsAt, type ExercisePassage } from './exercises';
 import type { MicrophoneSession } from './microphone';
-import type { PitchResult, MicrophoneState } from './pitch';
+import type { PitchResult, MicrophoneState, MicrophoneConfig } from './pitch';
 
 export type ExercisePitch = { captureTime: number; time: number; frequency: number; expectedMidi: number | null; cents: number | null };
 export type ExerciseSessionState =
@@ -44,7 +44,7 @@ export class ExerciseSession {
   }
   reset() { this.leave(); this.run = null; }
 
-  async start(passage: ExercisePassage, options: { deviceId: string; latencyMs: number }): Promise<void> {
+  async start(passage: ExercisePassage, options: { input: MicrophoneConfig; latencyMs: number }): Promise<void> {
     this.endPassage();
     const run: Run = {
       passage, origin: null, context: null, offset: 0, latencyMs: options.latencyMs,
@@ -59,7 +59,7 @@ export class ExerciseSession {
       if (passage.mode === 'listen') {
         this.microphone.release('exercises');
         capture = Promise.resolve(true);
-      } else capture = this.microphone.acquire('exercises', this.audio.context ?? undefined, options.deviceId);
+      } else capture = this.microphone.acquire('exercises', options.input, this.audio.context ?? undefined);
       const [, ready] = await Promise.all([prepared, capture]);
       if (this.run !== run || run.stoppedAt !== null) return;
       if (!ready) { this.stop(); return; }

@@ -401,10 +401,11 @@ try {
     add.call(shared, 'statechange', foreignListener);
     const interruptions = [];
     const input = new PitchInput(() => {}, () => {}, reason => { interruptions.push(reason); onInterruption?.(reason); });
+    const inputConfig = { deviceId: '', echoCancellation: false };
     const getUserMedia = navigator.mediaDevices.getUserMedia;
     try {
       for (let cycle = 0; cycle < 3; cycle++) {
-        await input.start(shared);
+        await input.start(inputConfig, shared);
         check(count(shared) === 1, 'One microphone listener must be registered per connection');
         input.stop(); input.stop();
         check(count(shared) === 0, 'Stopping must remove the exact statechange listener');
@@ -413,7 +414,7 @@ try {
       }
       await new Promise(resolve => setTimeout(resolve, 0));
       check(foreignChanges > 0 && interruptions.length === 0, 'Other listeners survive; stopped sessions do not report context changes');
-      await input.start(shared);
+      await input.start(inputConfig, shared);
       await input.startRecording();
       const deadline = performance.now() + 5000;
       while (!input.recordingData?.chunks.length) {
@@ -428,7 +429,7 @@ try {
       input.stop();
       check(count(shared) === 0 && shared.state === 'suspended', 'Cleanup detaches the listener after an interruption without closing the shared context');
       await shared.resume();
-      await input.start();
+      await input.start(inputConfig);
       const owned = [...listeners.keys()].find(context => count(context) === 1);
       check(owned && owned !== shared, 'An owned context also receives one listener');
       input.stop();
@@ -441,15 +442,15 @@ try {
         throw Error('Synthetic media source failure');
       };
       let sourceFailure;
-      try { await input.start(failing); } catch (cause) { sourceFailure = cause.message; }
+      try { await input.start(inputConfig, failing); } catch (cause) { sourceFailure = cause.message; }
       check(sourceFailure === 'Synthetic media source failure' && count(failing) === 0 && !input.active, 'Failed connection cleanup removes the registered listener');
       check(failing.state === 'running', 'A failed connection does not close a shared context');
       navigator.mediaDevices.getUserMedia = async () => { throw new DOMException('Synthetic microphone denial', 'NotAllowedError'); };
       let permissionFailure;
-      try { await input.start(shared); } catch (cause) { permissionFailure = cause.name; }
+      try { await input.start(inputConfig, shared); } catch (cause) { permissionFailure = cause.name; }
       check(permissionFailure === 'NotAllowedError' && count(shared) === 0, 'Failure before registration is safe to clean up');
       navigator.mediaDevices.getUserMedia = getUserMedia;
-      await input.start(shared); input.stop();
+      await input.start(inputConfig, shared); input.stop();
       check([...listeners.values()].every(registered => registered.size === 0), 'Reconnects and failures leave no context listeners behind');
       check(interruptions.length === 1, 'Closing stopped contexts does not report another interruption');
       return { cycles: 3, interruptions, partialSamples: partial.samples };
@@ -544,9 +545,9 @@ try {
     await preferencePage.locator('.mic-button').click();
     await preferencePage.waitForFunction(() => document.querySelector('.mic-button.active') && !document.querySelector('.mic-button:disabled'));
     await preferencePage.locator('.atelier-button').click();
-    assert.equal(await preferencePage.locator('#microphone').inputValue(), readsBlocked ? '' : 'synthetic-one');
-    await preferencePage.locator('#microphone').selectOption('synthetic-two');
-    await preferencePage.waitForFunction(() => !document.querySelector('#microphone').disabled && document.querySelector('.mic-button.active'));
+    assert.equal(await preferencePage.getByLabel('Entrée microphone', { exact: true }).inputValue(), readsBlocked ? '' : 'synthetic-one');
+    await preferencePage.getByLabel('Entrée microphone', { exact: true }).selectOption('synthetic-two');
+    await preferencePage.waitForFunction(() => !document.querySelector('.microphone-controls select').matches(':disabled') && document.querySelector('.mic-button.active'));
     assert.deepEqual(await preferencePage.evaluate(() => window.__microphoneRequests), [readsBlocked ? '' : 'synthetic-one', 'synthetic-two'], `${failure}: the selected device must be applied even without persistence`);
     assert.equal(await preferencePage.evaluate(() => window.__microphoneStops), 1);
     await preferencePage.locator('.mixer-panel').getByRole('button', { name: 'Fermer les instruments', exact: true }).click();

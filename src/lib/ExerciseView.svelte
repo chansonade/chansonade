@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, untrack, type Snippet } from 'svelte';
   import { ChevronLeft, ChevronRight, Play, Square, Music2 } from '@lucide/svelte';
   import type { ExerciseSession, ExerciseSessionState, ExercisePitch } from './exercise-session';
   import ExercisePlot from './ExercisePlot.svelte';
@@ -11,10 +11,11 @@
     type ExercisePreferences, type ExerciseMode, type ExercisePassage,
   } from './exercises';
 
-  let { session, scope, blocked, onplay }: {
+  let { session, scope, blocked, onplay, microphoneControls }: {
     session: ExerciseSession;
     scope: string;
     blocked: boolean;
+    microphoneControls: Snippet;
     onplay: (passage: ExercisePassage) => Promise<void>;
   } = $props();
   const id = $props.id();
@@ -242,7 +243,8 @@
       <output>{cents === null ? '—' : $t('{value} cents', { value: `${cents > 0 ? '+' : ''}${cents}` })}</output>
     </div>
     <ExercisePlot preview={passage} playback={playback} {confirmed} {pending} />
-    <p class="microphone-help">{$t('Utilisez un casque pour isoler votre voix. La courbe montre aussi les erreurs de hauteur et les silences.')}</p>
+    <p class="microphone-help">{$t('La courbe montre aussi les erreurs de hauteur et les silences.')}</p>
+    {@render microphoneControls()}
     <p class="exercise-status" role="status">{$t(error || (passage ? phase : 'Choisissez une étendue vocale pour commencer.'))}</p>
   </div>
   <footer class="exercise-transport">

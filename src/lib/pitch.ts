@@ -2,6 +2,9 @@ import { microphoneWav } from './wav';
 import { PITCH_CONFIG } from './pitch-config';
 import { recordingMaxSamples } from './recording-limits';
 
+export type MicrophoneConfig = { readonly deviceId: string; readonly echoCancellation: boolean };
+export type MicrophoneInfo = { label: string; settings: MediaTrackSettings };
+
 export type MicrophoneState = 'idle' | 'starting' | 'active';
 
 export interface PitchResult {
@@ -55,6 +58,7 @@ const captureModules = new WeakMap<AudioContext, Promise<void>>();
 export class PitchInput {
   private context: AudioContext | null = null;
   private readonly stateListeners = new Set<(state: MicrophoneState) => void>();
+  private readonly trackConfigurationChange = () => this.notifyState();
   private contextStateChange: (() => void) | null = null;
   private ownsContext = false;
   private stream: MediaStream | null = null;
@@ -100,7 +104,7 @@ export class PitchInput {
     return this.context?.currentTime ?? 0;
   }
 
-  get inputInfo(): { label: string; settings: MediaTrackSettings } | null {
+  get inputInfo(): MicrophoneInfo | null {
     const track = this.stream?.getAudioTracks()[0];
     return track ? { label: track.label, settings: track.getSettings() } : null;
   }
@@ -246,13 +250,13 @@ export class PitchInput {
     this.recordingStop = null;
   }
 
-  async start(sharedAudioContext?: AudioContext, deviceId = ''): Promise<void> {
+  async start(config: MicrophoneConfig, sharedAudioContext?: AudioContext): Promise<void> {
     if (this.running) return;
     if (this.recordingData) throw new Error('L’enregistrement précédent est encore en cours de sauvegarde.');
     if (this.interrupted) this.stop();
     if (this.starting) return this.starting;
     const revision = ++this.revision;
-    const pending = this.connect(sharedAudioContext, revision, deviceId);
+    const pending = this.connect(sharedAudioContext, revision, config);
     this.starting = pending;
     this.notifyState();
     try {
@@ -262,7 +266,7 @@ export class PitchInput {
     }
   }
 
-  private async connect(shared: AudioContext | undefined, revision: number, deviceId: string): Promise<void> {
+  private async connect(shared: AudioContext | undefined, revision: number, config: MicrophoneConfig): Promise<void> {
     try {
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error('Le microphone nécessite HTTPS ou localhost.');
@@ -277,9 +281,9 @@ export class PitchInput {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: false,
         audio: {
-          ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+          ...(config.deviceId ? { deviceId: { exact: config.deviceId } } : {}),
           channelCount: 1,
-          echoCancellation: false,
+          echoCancellation: config.echoCancellation,
           noiseSuppression: false,
           autoGainControl: false,
         },
@@ -290,6 +294,7 @@ export class PitchInput {
         return;
       }
       this.stream = stream;
+      stream.getAudioTracks()[0]?.addEventListener('configurationchange', this.trackConfigurationChange);
       await resumed;
       let module = captureModules.get(context);
       if (!module) {
@@ -341,7 +346,7 @@ export class PitchInput {
           worker.postMessage({ ...event.data, sampleRate: context.sampleRate }, [event.data.samples.buffer]);
         }
       };
-      // Input 0 stays completely unfiltered for WAV recording. Input 1 feeds
+      // Input 0 keeps the browser capture (raw unless AEC is chosen). Input 1 feeds
       // pitch analysis after a continuous, narrow 50 Hz mains rejection.
       const filter = context.createBiquadFilter();
       filter.type = 'notch'; filter.frequency.value = PITCH_CONFIG.mainsNotchHz; filter.Q.value = PITCH_CONFIG.mainsNotchQ;
@@ -390,6 +395,7 @@ export class PitchInput {
     this.worker = null;
     for (const waiter of this.flushWaiters.values()) { clearTimeout(waiter.timer); waiter.reject(new Error('Le décodeur de hauteur est arrêté.')); }
     this.flushWaiters.clear();
+    this.stream?.getAudioTracks()[0]?.removeEventListener('configurationchange', this.trackConfigurationChange);
     this.stream?.getTracks().forEach((track) => track.stop());
     this.stream = null;
     if (this.ownsContext && this.context?.state !== 'closed') {

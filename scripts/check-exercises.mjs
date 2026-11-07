@@ -194,6 +194,20 @@ try {
   await page.evaluate(async () => {
     const { initializeLanguage, setLanguage, setNoteNotation, noteName, noteFormatter } = await import('/src/lib/i18n.ts');
     const check = (condition, message) => { if (!condition) throw Error(message); };
+    const { readMicrophoneConfig, writeMicrophoneConfig } = await import('/src/lib/microphone.ts');
+    check(!readMicrophoneConfig().echoCancellation && readMicrophoneConfig().deviceId === '', 'Default input is raw and system-selected');
+    localStorage.setItem('chansonade.echo-cancellation', 'invalid');
+    check(!readMicrophoneConfig().echoCancellation, 'Invalid echo preference is off');
+    writeMicrophoneConfig({ deviceId: 'synthetic-pref', echoCancellation: true });
+    check(readMicrophoneConfig().echoCancellation && readMicrophoneConfig().deviceId === 'synthetic-pref', 'Both input choices persist together');
+    const readItem = Storage.prototype.getItem, writeItem = Storage.prototype.setItem;
+    Storage.prototype.getItem = () => { throw new DOMException('Synthetic denied input preference', 'SecurityError'); };
+    check(!readMicrophoneConfig().echoCancellation && readMicrophoneConfig().deviceId === '', 'Denied input reads use defaults');
+    Storage.prototype.getItem = readItem;
+    Storage.prototype.setItem = () => { throw new DOMException('Synthetic denied input write', 'QuotaExceededError'); };
+    writeMicrophoneConfig({ deviceId: 'refused', echoCancellation: false });
+    Storage.prototype.setItem = writeItem;
+    check(readMicrophoneConfig().echoCancellation, 'Denied input writes preserve the stored preference');
     localStorage.setItem('chansonade.note-notation', 'invalid');
     initializeLanguage();
     setLanguage('de');
@@ -233,7 +247,7 @@ try {
     let rejectInput, openings = 0;
     const denied = new Promise((_resolve, reject) => { rejectInput = reject; });
     const lease = new MicrophoneSession({ active: false, start() { openings++; return denied; }, stop() {} });
-    const studio = lease.acquire('studio', undefined, ''), borrowed = lease.acquire('exercises', undefined, '');
+    const studio = lease.acquire('studio', { deviceId: '', echoCancellation: false }), borrowed = lease.acquire('exercises', { deviceId: '', echoCancellation: false });
     rejectInput(Error('Synthetic denied shared request'));
     const failures = await Promise.allSettled([studio, borrowed]);
     check(openings === 1 && failures.every(result => result.status === 'rejected'), 'One physical acquisition broadcasts its failure to all borrowers');
@@ -245,7 +259,7 @@ try {
     const practice = new ExerciseSession(audio, input);
     const config = { exerciseId: 'sustained', bpm: 80, step: 1, voice: { low: 48, high: 72, tonic: 57 } };
     practice.enter();
-    await practice.start(createExercisePassage(config, 'guide'), { deviceId: '', latencyMs: 120 });
+    await practice.start(createExercisePassage(config, 'guide'), { input: { deviceId: '', echoCancellation: false }, latencyMs: 120 });
     const result = (time, frequency) => ({ time, frequency, clarity: .9, rms: .1, midi: 69, cents: 0 });
     const captured = 100.25 - 88 + .12 + 1.6;
     check(practice.confirm(result(captured, 440)), 'Exercise capture is consumed before score projection');
@@ -262,7 +276,7 @@ try {
     check(practice.confirmed.length === fullCount, 'Continued microphone input after the passage does not grow its history');
     audioClock.currentTime = 120; captureClock.currentTime = 32;
     config.voice.tonic = 59; config.bpm = 160;
-    await practice.start(createExercisePassage(config, 'solo'), { deviceId: '', latencyMs: 120 });
+    await practice.start(createExercisePassage(config, 'solo'), { input: { deviceId: '', echoCancellation: false }, latencyMs: 120 });
     practice.confirm(result(captured, 440));
     check(practice.confirmed.length === 0, 'Old delayed results cannot enter the next key');
     practice.confirm(result(120.25 - 88 + .12 + 1, 440));
@@ -290,9 +304,10 @@ try {
   ui.on('page', page => page.on('pageerror', error => errors.push(error.message)));
   const syntheticMicrophone = () => {
     if (location.origin === 'null') return;
-    window.__micOpens = 0; window.__micStops = 0; window.__micFrequency = 220;
-    navigator.mediaDevices.enumerateDevices = async () => [];
-    navigator.mediaDevices.getUserMedia = async () => {
+    window.__micOpens = 0; window.__micStops = 0; window.__micFrequency = 220; window.__micRequests = [];
+    navigator.mediaDevices.enumerateDevices = async () => ['a', 'b'].map(id => ({ kind: 'audioinput', deviceId: `synthetic-${id}`, label: `Synthetic microphone ${id}`, groupId: 'synthetic' }));
+    navigator.mediaDevices.getUserMedia = async constraints => {
+      window.__micRequests.push(structuredClone(constraints));
       if (window.__denyMic) throw new DOMException('Synthetic microphone permission denied', 'NotAllowedError');
       const audio = new AudioContext(), destination = audio.createMediaStreamDestination();
       const oscillator = audio.createOscillator(), gain = audio.createGain();
@@ -301,6 +316,13 @@ try {
       window.__signal = { context: audio, frequency: oscillator.frequency, gain: gain.gain };
       window.__micOpens++;
       const track = destination.stream.getAudioTracks()[0], stop = track.stop.bind(track);
+      Object.defineProperty(track, 'label', { value: 'Synthetic exercise microphone' });
+      const applied = Object.hasOwn(window, '__appliedEcho') ? window.__appliedEcho : constraints.audio.echoCancellation;
+      const settings = { sampleRate: audio.sampleRate, channelCount: 1,
+        deviceId: constraints.audio.deviceId?.exact ?? 'synthetic-default',
+        ...(applied === 'unknown' ? {} : { echoCancellation: applied }), noiseSuppression: false, autoGainControl: false };
+      track.getSettings = () => ({ ...settings });
+      window.__trackSettings = settings; window.__micTrack = track;
       let stopped = false;
       track.stop = () => { if (stopped) return; stopped = true; window.__micStops++; stop(); oscillator.stop(); void audio.close(); };
       if (window.__holdMic) await new Promise(resolve => { window.__releaseMic = resolve; });
@@ -775,14 +797,20 @@ try {
   });
   await exercisePage.waitForTimeout(70);
   const clickExercise = text => exercisePage.evaluate(text => [...document.querySelectorAll('.exercise-actions button')].find(button => button.textContent.trim() === text).click(), text);
+  const waitStartedWithoutAnimation = () => exercisePage.waitForFunction(() =>
+    window.__exerciseSession.state.phase === 'playing'
+      && [...document.querySelectorAll('.exercise-actions button')].some(button => button.textContent.trim() === 'Stop' && !button.disabled),
+    null, { polling: 20 });
   await clickExercise('Avec guide');
   await exercisePage.waitForFunction(() => !!window.__releaseMic && document.querySelector('.mic-button').disabled, null, { polling: 20 });
   await exercisePage.evaluate(() => { window.__holdMic = false; window.__releaseMic(); });
   await exercisePage.waitForFunction(() => document.querySelector('.exercise-voice .active') && document.querySelector('.mic-button.active') && !document.querySelector('.mic-button').disabled, null, { polling: 20 });
+  await waitStartedWithoutAnimation();
   await exercisePage.evaluate(() => window.__exerciseInput.capture.onprocessorerror(new Event('processorerror')));
   await exercisePage.waitForFunction(() => !document.querySelector('.exercise-voice .active') && !document.querySelector('.mic-button.active') && !document.querySelector('.mic-button').disabled, null, { polling: 20 });
   await clickExercise('Avec guide');
   await exercisePage.waitForFunction(() => document.querySelector('.exercise-voice .active') && document.querySelector('.mic-button.active'), null, { polling: 20 });
+  await waitStartedWithoutAnimation();
   await clickExercise('Stop');
   await exercisePage.evaluate(() => { window.__denyMic = true; });
   await clickExercise('Avec guide');
@@ -810,6 +838,170 @@ try {
   });
   assert.deepEqual(errors, [], 'No unhandled option or microphone state errors');
   console.log('PASS pitch axis labels: sustained/adjacent notes, octave errors and full detector range at narrow and wide plot widths');
+
+  // The device configuration is shared by studio, exercise and take owners.
+  await exercisePage.getByRole('button', { name: 'Partition', exact: true }).click();
+  await exercisePage.evaluate(() => {
+    window.__micRequests = [];
+    delete window.__appliedEcho;
+    navigator.mediaDevices.enumerateDevices = async () => ['a', 'b'].map(id => ({
+      kind: 'audioinput', deviceId: `synthetic-${id}`, label: `Synthetic microphone ${id}`, groupId: 'synthetic',
+    }));
+    navigator.mediaDevices.dispatchEvent(new Event('devicechange'));
+  });
+  const echoLabel = 'Annulation d’écho (sans casque)';
+  const echo = () => exercisePage.getByLabel(echoLabel, { exact: true });
+  const inputOwner = () => exercisePage.evaluate(() => window.__exerciseSession.microphone.owner);
+  await exercisePage.getByRole('button', { name: 'Écouter ma voix', exact: true }).click();
+  await exercisePage.waitForFunction(() => window.__exerciseInput.active);
+  assert.deepEqual(await exercisePage.evaluate(() => window.__micRequests[0].audio), {
+    channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+  }, 'Default capture is unchanged');
+  const studioBeforeInputChange = await studioSnapshot();
+  await exercisePage.getByRole('button', { name: 'Voix & instruments', exact: true }).click();
+  const mixer = exercisePage.locator('.mixer-panel');
+  await echo().check();
+  await exercisePage.waitForFunction(() => window.__micRequests.length === 2 && window.__exerciseInput.active);
+  await mixer.getByRole('status').filter({ hasText: 'Annulation d’écho active.' }).waitFor();
+  assert.equal(await inputOwner(), 'studio');
+  await mixer.getByLabel('Entrée microphone', { exact: true }).selectOption('synthetic-b');
+  await exercisePage.waitForFunction(() => window.__micRequests.length === 3 && window.__exerciseInput.active);
+  assert.deepEqual(await exercisePage.evaluate(() => window.__micRequests.at(-1).audio), {
+    deviceId: { exact: 'synthetic-b' }, channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: false,
+  }, 'Device and echo cancellation are one capture configuration');
+  assert.equal(await inputOwner(), 'studio');
+  assert.deepEqual(await studioSnapshot(), studioBeforeInputChange, 'Changing input does not alter studio position, tempo, mix or loop');
+
+  // Persist the applied settings, not the request: simulate a browser keeping AEC on.
+  await exercisePage.evaluate(() => { window.__appliedEcho = true; });
+  await echo().uncheck();
+  await mixer.getByRole('status').filter({ hasText: 'Le navigateur maintient l’annulation d’écho malgré votre choix.' }).waitFor();
+  await mixer.getByRole('button', { name: 'Fermer les instruments', exact: true }).click();
+  await exercisePage.getByRole('button', { name: 'Enregistrer un essai', exact: true }).click();
+  await exercisePage.locator('.take-button.recording').waitFor();
+  await exercisePage.getByRole('button', { name: 'Voix & instruments', exact: true }).click();
+  assert(await echo().isDisabled(), 'AEC cannot change during a take');
+  assert(await mixer.getByLabel('Entrée microphone', { exact: true }).isDisabled());
+  const requestsDuringTake = await exercisePage.evaluate(() => window.__micRequests.length);
+  await echo().evaluate(node => {
+    node.checked = true; node.dispatchEvent(new Event('change', { bubbles: true })); node.checked = false;
+  });
+  assert.equal(await exercisePage.evaluate(() => window.__micRequests.length), requestsDuringTake);
+  assert.equal(await exercisePage.evaluate(() => localStorage.getItem('chansonade.echo-cancellation')), 'false', 'The action also guards against programmatic changes during recording');
+  await mixer.getByRole('button', { name: 'Fermer les instruments', exact: true }).click();
+  await exercisePage.waitForTimeout(300);
+  await exercisePage.getByRole('button', { name: 'Arrêter l’essai', exact: true }).click();
+  await exercisePage.waitForFunction(() => !document.querySelector('.take-button.recording') && !document.querySelector('.take-button').disabled);
+  const actualTake = await exercisePage.evaluate(async () => {
+    const s = await import('/src/lib/storage.ts');
+    const [latest] = await s.listTakes(); return s.getTake(latest.id);
+  });
+  assert.equal(actualTake.input.settings.echoCancellation, true, 'Take metadata comes from getSettings, despite requested false');
+  assert.equal(actualTake.input.settings.noiseSuppression, false);
+  await exercisePage.evaluate(async input => {
+    const { finishCapturedTake } = await import('/src/lib/take-session.ts');
+    const recording = { audio: new Blob([new Uint8Array(48)]), duration: .01, sampleRate: 48000, samples: 4, analysisComplete: false };
+    const result = await finishCapturedTake({ inputInfo: null, stopRecording: async () => recording }, {
+      scope: 'anonymous', startedAt: 0, createdAt: 1, scoreId: 'synthetic-interrupted', title: 'Synthetic interrupted', scoreXML: '<score-partwise/>',
+      settings: { rate: 1, loopA: null, loopB: null, loopEnabled: false, target: 0, parts: [] },
+      input, latencyMs: 0, pitches: [], transport: [],
+    });
+    if (result.take.input.settings.echoCancellation !== true) throw Error('Closed input lost applied AEC metadata');
+  }, actualTake.input);
+  const declarations = [];
+  const uploadStub = async route => {
+    if (route.request().method() === 'POST') {
+      declarations.push(route.request().postDataJSON());
+      return route.fulfill({ status: 413, json: { message: 'Synthetic quota' } });
+    }
+    return route.fulfill({ json: { takes: [] } });
+  };
+  await ui.route('**/api/v1/takes**', uploadStub);
+  await exercisePage.evaluate(async () => {
+    const s = await import('/src/lib/storage.ts'), t = await import('/src/lib/take-sync.ts');
+    await t.synchronizeTakes(s.storageScope(), 'exercise-ui-a', new AbortController().signal, () => true);
+  });
+  await ui.unroute('**/api/v1/takes**', uploadStub);
+  const sentInput = declarations.find(item => item.metadata.id === actualTake.id)?.metadata.input;
+  assert.equal(sentInput.settings.echoCancellation, true, 'Take transfer preserves the applied flag');
+  assert.equal(sentInput.label, ''); assert.equal(sentInput.settings.deviceId, undefined, 'Existing upload privacy filter is preserved');
+  await exercisePage.getByRole('button', { name: 'Arrêter le microphone', exact: true }).click();
+  await chooseExercises();
+  await exercisePage.evaluate(() => { window.__appliedEcho = false; window.__holdMic = true; });
+  await panel.getByRole('button', { name: 'Avec guide', exact: true }).click();
+  await exercisePage.waitForFunction(() => window.__exerciseInput.state === 'starting' && !!window.__releaseMic);
+  assert(await echo().isDisabled(), 'AEC cannot change while permission is pending');
+  const pendingRequests = await exercisePage.evaluate(() => window.__micRequests.length);
+  await echo().evaluate(node => {
+    node.checked = true; node.dispatchEvent(new Event('change', { bubbles: true })); node.checked = false;
+  });
+  assert.equal(await exercisePage.evaluate(() => window.__micRequests.length), pendingRequests);
+  await exercisePage.evaluate(() => { window.__holdMic = false; window.__releaseMic(); }); await waitPlaying();
+  const beforeExerciseInput = await exercisePage.evaluate(() => ({ opens: window.__micOpens, starts: window.__exerciseStarts.length }));
+  await echo().check();
+  await panel.getByRole('status').filter({ hasText: 'Le navigateur n’a pas activé l’annulation d’écho demandée.' }).waitFor();
+  assert.equal(await inputOwner(), 'exercises', 'Reopening preserves the exercise owner');
+  assert.equal(await exercisePage.evaluate(() => window.__micOpens), beforeExerciseInput.opens + 1);
+  assert.equal(await exercisePage.evaluate(() => window.__exerciseStarts.length), beforeExerciseInput.starts, 'No automatic accompaniment restart');
+  assert.equal(await exercisePage.evaluate(() => window.__exerciseSession.state.phase), 'stopped');
+  await exercisePage.evaluate(() => { window.__appliedEcho = 'unknown'; });
+  await echo().uncheck();
+  await panel.getByRole('status').filter({ hasText: 'Le navigateur n’indique pas l’état de l’annulation d’écho.' }).waitFor();
+  await exercisePage.evaluate(() => { window.__appliedEcho = 'remote-only'; });
+  await echo().check();
+  await panel.getByRole('status').filter({ hasText: 'Le navigateur n’annule que l’audio distant, pas le guide local.' }).waitFor();
+  await exercisePage.evaluate(() => { window.__appliedEcho = 'all'; });
+  await echo().uncheck();
+  await panel.getByRole('status').filter({ hasText: 'Le navigateur maintient l’annulation d’écho malgré votre choix.' }).waitFor();
+  await echo().check();
+  await panel.getByRole('status').filter({ hasText: 'Annulation d’écho active.' }).waitFor();
+  const beforeModeChange = await exercisePage.evaluate(() => window.__micRequests.length);
+  await exercisePage.evaluate(() => {
+    window.__trackSettings.echoCancellation = false;
+    window.__micTrack.dispatchEvent(new Event('configurationchange'));
+  });
+  await panel.getByRole('status').filter({ hasText: 'Le navigateur n’a pas activé l’annulation d’écho demandée.' }).waitFor();
+  assert.equal(await exercisePage.evaluate(() => window.__micRequests.length), beforeModeChange, 'An applied-settings change updates feedback without reopening the input');
+  await exercisePage.evaluate(() => {
+    window.__trackSettings.echoCancellation = true;
+    window.__micTrack.dispatchEvent(new Event('configurationchange'));
+  });
+  await panel.getByRole('status').filter({ hasText: 'Annulation d’écho active.' }).waitFor();
+  assert((await echo().getAttribute('aria-describedby'))?.length > 0);
+  for (const request of await exercisePage.evaluate(() => window.__micRequests)) {
+    assert.equal(request.audio.noiseSuppression, false); assert.equal(request.audio.autoGainControl, false);
+    assert.equal(typeof request.audio.echoCancellation, 'boolean');
+  }
+  for (const [width, height, language, label] of [
+    [390,844,'en','Echo cancellation (without headphones)'],
+    [844,390,'de','Echounterdrückung (ohne Kopfhörer)'],
+    [390,844,'nl','Echo-onderdrukking (zonder hoofdtelefoon)'],
+  ]) {
+    await exercisePage.setViewportSize({ width, height });
+    await exercisePage.evaluate(async language => (await import('/src/lib/i18n.ts')).setLanguage(language), language);
+    const control = panel.getByLabel(label, { exact: true });
+    assert(await control.isChecked(), 'AEC control is translated in every language');
+    await control.scrollIntoViewIfNeeded();
+    const target = await control.locator('..').boundingBox();
+    assert(target.height >= 44 && target.width >= 44 && target.x >= 0 && target.x + target.width <= width + 1);
+  }
+  await exercisePage.evaluate(async () => (await import('/src/lib/i18n.ts')).setLanguage('fr'));
+  if (await exercisePage.locator('.toast').count()) await exercisePage.getByRole('button', { name: 'Fermer le message', exact: true }).click();
+  if (screenshotDir) {
+    await exercisePage.setViewportSize({ width: 1280, height: 1000 });
+    await panel.locator('.microphone-controls').scrollIntoViewIfNeeded();
+    await exercisePage.screenshot({ path: `${screenshotDir}/exercises-echo-cancellation-desktop.png` });
+  }
+  await exercisePage.evaluate(async a => (await import('/src/lib/sync.ts')).login(a.email, 'synthetic'), accountB);
+  assert(await echo().isChecked(), 'Input preference is shared across accounts on this device');
+  await exercisePage.reload(); await studioReady(); await chooseExercises();
+  assert(await echo().isChecked(), 'AEC survives page reload');
+  assert.equal(await panel.getByLabel('Entrée microphone', { exact: true }).inputValue(), 'synthetic-b', 'Device preference survives alongside AEC');
+  await panel.getByRole('button', { name: 'Avec guide', exact: true }).click(); await waitPlaying();
+  assert.equal(await exercisePage.evaluate(() => window.__micRequests.at(-1).audio.echoCancellation), true, 'Persisted AEC is used by the next physical opening');
+  await panel.getByRole('button', { name: 'Stop', exact: true }).click();
+  assert.deepEqual(errors, []);
+  console.log('PASS microphone AEC: default/true constraints with NS/AGC off, studio/exercise owner reopening, preserved studio, pending/take guards, applied/missing/mode feedback, actual take metadata/upload and device-local persistence across accounts/reload');
 
   // Cached identity is not a confirmed connection. Adoption updates an already open view.
   const cached = await browser.newContext({ serviceWorkers: 'block' }); contexts.push(cached);

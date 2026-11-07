@@ -196,10 +196,43 @@ les choix utilisables en mémoire ; langue et thème n'affectent pas cet abonnem
 Le composant est remonté par scope et nettoie abonnement, ResizeObserver et rAF
 à la sortie. Aucune préférence d'exercice n'est synchronisée avec le serveur.
 
+La configuration d'entrée `{deviceId, echoCancellation}` est commune au studio,
+aux exercices et aux prises. Les préférences `chansonade.microphone` et
+`chansonade.echo-cancellation` appartiennent à l'appareil via `preferences.ts` ;
+l'annulation d'écho est désactivée par défaut. `MicrophoneControls.svelte`, rendu
+par le même snippet dans le studio et les exercices, partage sélecteur, option,
+aide et état réellement appliqué. Changer une option rouvre l'entrée pour son
+propriétaire courant ; un passage d'exercice est arrêté et garde sa courbe, sans
+reprise sonore automatique. Le changement est refusé pendant une prise et pendant
+l'ouverture du micro. Ni le transport du studio ni son mix ne sont modifiés.
+
+`PitchInput` demande `echoCancellation: true` ou `false` sans contrainte obligatoire ;
+`noiseSuppression` et `autoGainControl` restent à `false`. Le navigateur choisit la
+référence d'écho ; aucune annulation parfaite du guide n'est garantie. Le booléen
+est portable ; `remote-only` vise les pistes WebRTC distantes et manquerait le
+guide local, `all` vise tout le son du système mais n'est pas interopérable.
+Si la demande est ignorée ou l'état inconnu, l'interface le dit d'après
+`track.getSettings()`, sans confondre demande et application. Un événement
+`configurationchange` de la piste rafraîchit aussi cet état, sans rouvrir le micro. Le casque reste
+préférable : à l'unisson, l'annulation peut aussi atténuer la voix chantée.
+Les réglages réellement appliqués sont figés au début d'une prise, conservés même
+après une interruption et transmis par la liste blanche existante de `take-sync.ts`.
+Aucun traitement d'annulation supplémentaire, seuil ou masquage n'est ajouté à
+la courbe ; YIN, le décodeur et le filtre secteur sont inchangés.
+
+Références navigateur : [sémantique W3C des modes et du booléen](https://www.w3.org/TR/mediacapture-streams/#dom-echocancellationmodeenum),
+[prise en charge des modes dans les données MDN](https://github.com/mdn/browser-compat-data/blob/main/api/MediaStreamTrack.json),
+[référence de sortie Chrome-wide dans Chromium](https://chromium.googlesource.com/chromium/src/+/main/media/base/media_switches.cc),
+[graphes de sortie et AudioContext dans Firefox](https://bugzilla.mozilla.org/show_bug.cgi?id=1849108),
+[traitement VPIO de WebKit sur macOS](https://results.webkit.org/commit?id=303113%40main&repository_id=webkit).
+Le support de la contrainte ou un état actif ne prouve pas l'efficacité acoustique
+sur les haut-parleurs de la machine ; celle-ci demande un essai matériel.
+
 ## De l'entrée micro à la courbe
 
 `PitchInput` relie le micro à `public/audio/capture-worklet.js`. Deux branches
-partagent la même horloge : l'entrée brute alimente le WAV, tandis que la branche
+partagent la même horloge : l'entrée brute (sauf annulation d'écho choisie par
+l'utilisateur) alimente le WAV, tandis que la branche
 d'analyse passe par un filtre secteur étroit avant la capture des fenêtres.
 
 Le Worker extrait plusieurs candidats YIN par fenêtre. Un seul décodeur temporel
